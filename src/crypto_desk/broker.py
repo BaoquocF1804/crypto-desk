@@ -105,47 +105,61 @@ class BinanceSpotBroker:
         nav = Decimal("0")
         free_usdt = Decimal("0")
         positions: list[dict[str, str]] = []
+
+        entries: list[tuple[str, Decimal, Decimal, Decimal]] = []
         for balance in balances:
             asset = str(balance["asset"])
             free = Decimal(str(balance["free"]))
             locked = Decimal(str(balance["locked"]))
             total = free + locked
-            if total == 0:
-                continue
+            if total > 0:
+                entries.append((asset, free, locked, total))
+
+        external_mids: dict[str, Decimal] | None = None
+        if any(asset != "USDT" and f"{asset}USDT" not in V1_SYMBOLS for asset, _, _, _ in entries):
+            external_mids = self._external_mids()
+
+        for asset, free, locked, total in entries:
             if asset == "USDT":
-                mid = Decimal("1")
+                nav += total
                 free_usdt = free
+                continue
+            symbol = f"{asset}USDT"
+            external = symbol not in V1_SYMBOLS
+            if external:
+                mid = (external_mids or {}).get(symbol)
             else:
-                symbol = f"{asset}USDT"
-                if symbol not in V1_SYMBOLS:
-                    positions.append(
-                        {
-                            "asset": asset,
-                            "symbol": symbol,
-                            "free": str(free),
-                            "locked": str(locked),
-                            "total": str(total),
-                            "mid_usdt": "0",
-                            "value_usdt": "0",
-                            "unpriced": True,
-                        }
-                    )
-                    continue
                 mid = self.latest_quote(symbol).mid
-            value = total * mid
-            nav += value
-            if asset != "USDT":
+            if mid is None:
+                reason = "pricing_unavailable" if external_mids is None else "no_usdt_pair"
                 positions.append(
                     {
                         "asset": asset,
-                        "symbol": f"{asset}USDT",
+                        "symbol": symbol,
                         "free": str(free),
                         "locked": str(locked),
                         "total": str(total),
-                        "mid_usdt": str(mid),
-                        "value_usdt": str(value),
+                        "mid_usdt": "0",
+                        "value_usdt": "0",
+                        "unpriced": True,
+                        "unpriced_reason": reason,
                     }
                 )
+                continue
+            value = total * mid
+            nav += value
+            position = {
+                "asset": asset,
+                "symbol": symbol,
+                "free": str(free),
+                "locked": str(locked),
+                "total": str(total),
+                "mid_usdt": str(mid),
+                "value_usdt": str(value),
+            }
+            if external:
+                position["external"] = True
+            positions.append(position)
 
         open_orders = _unwrap(self._client.rest_api.get_open_orders())
         if not isinstance(open_orders, list):
@@ -210,6 +224,26 @@ class BinanceSpotBroker:
             ask=ask,
             mid=(bid + ask) / Decimal("2"),
         )
+
+    def _external_mids(self) -> dict[str, Decimal] | None:
+        try:
+            payload = _unwrap(self._client.rest_api.ticker_book_ticker())
+        except Exception:
+            return None
+        if not isinstance(payload, list):
+            return None
+        mids: dict[str, Decimal] = {}
+        for entry in payload:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                bid = Decimal(str(entry["bidPrice"]))
+                ask = Decimal(str(entry["askPrice"]))
+            except (KeyError, TypeError, ValueError, ArithmeticError):
+                continue
+            if bid > 0 and ask > bid:
+                mids[str(entry["symbol"])] = (bid + ask) / Decimal("2")
+        return mids
 
     def place_entry_otoco(self, ticket: TradeTicket) -> dict[str, Any]:
         self._validate_ticket(ticket, side="BUY")

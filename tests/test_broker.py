@@ -266,3 +266,63 @@ def test_reconcile_derives_terminal_state_from_individual_otoco_orders(
 
     assert result["status"] == "FILLED"
     assert len(result["orders_detail"]) == 3
+
+
+def test_non_allowlist_asset_with_usdt_pair_is_priced_into_nav(testnet_env, sdk):
+    original = sdk.rest_api.ticker_book_ticker
+
+    def with_batch(**kwargs):
+        if "symbol" not in kwargs:
+            return [{"symbol": "DOGEUSDT", "bidPrice": "0.10", "askPrice": "0.12"}]
+        return original(**kwargs)
+
+    sdk.rest_api.ticker_book_ticker = with_batch
+    sdk.rest_api.account["balances"].append({"asset": "DOGE", "free": "100", "locked": "0"})
+
+    snapshot = BinanceSpotBroker("testnet", client=sdk).account_snapshot()
+
+    doge = next(position for position in snapshot.positions if position["asset"] == "DOGE")
+    assert doge["external"] is True
+    assert doge["mid_usdt"] == "0.11"
+    assert doge["value_usdt"] == "11.00"
+    assert snapshot.nav_usdt == Decimal("281.00000000")
+
+
+def test_asset_without_usdt_pair_is_marked_no_usdt_pair(testnet_env, sdk):
+    original = sdk.rest_api.ticker_book_ticker
+
+    def with_batch(**kwargs):
+        if "symbol" not in kwargs:
+            return []
+        return original(**kwargs)
+
+    sdk.rest_api.ticker_book_ticker = with_batch
+    sdk.rest_api.account["balances"].append({"asset": "ODD", "free": "1", "locked": "0"})
+
+    snapshot = BinanceSpotBroker("testnet", client=sdk).account_snapshot()
+
+    odd = next(position for position in snapshot.positions if position["asset"] == "ODD")
+    assert odd["unpriced"] is True
+    assert odd["unpriced_reason"] == "no_usdt_pair"
+    assert snapshot.nav_usdt == Decimal("270.00000000")
+
+
+def test_batch_pricing_failure_is_marked_pricing_unavailable(testnet_env, sdk):
+    sdk.rest_api.account["balances"].append({"asset": "DUST", "free": "1", "locked": "0"})
+
+    snapshot = BinanceSpotBroker("testnet", client=sdk).account_snapshot()
+
+    dust = next(position for position in snapshot.positions if position["asset"] == "DUST")
+    assert dust["unpriced"] is True
+    assert dust["unpriced_reason"] == "pricing_unavailable"
+
+
+def test_v1_only_account_skips_batch_pricing(testnet_env, sdk):
+    BinanceSpotBroker("testnet", client=sdk).account_snapshot()
+
+    batch_calls = [
+        params
+        for name, params in sdk.rest_api.calls
+        if name == "ticker_book_ticker" and "symbol" not in params
+    ]
+    assert batch_calls == []
