@@ -1,6 +1,6 @@
-#!/bin/sh
-set -eu
-script_path=$(readlink -f "$0")
-root=$(CDPATH= cd -- "$(dirname -- "$script_path")/.." && pwd)
-exec "$root/.venv/bin/desk" --config "$root/config.yaml" "$@"
+#!/usr/bin/env bash
+set -euo pipefail
 
+script_path=$(readlink -f "$0")
+root=$(cd -- "$(dirname -- "$script_path")/.." && pwd)
+exec "$root/.venv/bin/desk" --config "$root/config.yaml" "$@"

@@ -25,7 +25,7 @@ dev = ["pytest==8.4.2", "ruff==0.15.5"]
 desk = "crypto_desk.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/investment_desk", "src/crypto_desk"]
+packages = ["src/crypto_desk"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

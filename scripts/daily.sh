@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-output="$("$(dirname "$0")/desk" --json health --due)"
+output="$("$(dirname "$0")/desk" --json daily --due)"
 case "$output" in
   *'"status": "ALREADY_DONE"'*) exit 0 ;;
 esac

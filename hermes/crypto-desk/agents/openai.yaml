@@ -1,0 +1,4 @@
+interface:
+  display_name: "Crypto Desk"
+  short_description: "Operate a guarded Binance Spot crypto desk"
+  default_prompt: "Use $crypto-desk to inspect or act on the guarded Crypto Desk."
