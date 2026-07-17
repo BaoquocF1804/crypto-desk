@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "investment-desk"
+version = "0.1.0"
+description = "A human-approved AI investment desk for IBKR Paper"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "exchange-calendars==4.11.1",
+  "python-dotenv==1.2.1",
+  "PyYAML==6.0.2",
+  "typer==0.21.0",
+  "yfinance==1.4.1",
+]
+
+[project.optional-dependencies]
+research = [
+  "openbb==4.7.2",
+  "openbb-mcp-server==1.4.1",
+  "tradingagents @ git+https://github.com/TauricResearch/TradingAgents.git@v0.3.1",
+]
+broker = ["ib_async==2.1.0"]
+dev = ["pytest==8.4.2", "ruff==0.15.5"]
+all = [
+  "openbb==4.7.2",
+  "openbb-mcp-server==1.4.1",
+  "tradingagents @ git+https://github.com/TauricResearch/TradingAgents.git@v0.3.1",
+  "ib_async==2.1.0",
+]
+
+[project.scripts]
+desk = "investment_desk.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/investment_desk"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--capture=sys"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

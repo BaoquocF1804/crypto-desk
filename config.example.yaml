@@ -1,0 +1,34 @@
+base_currency: USD
+database: data/desk.sqlite3
+artifacts: artifacts
+
+models:
+  quick: gpt-5.4-mini
+  deep: gpt-5.5
+  debate_rounds: 2
+
+risk:
+  per_trade: 0.01
+  max_symbol: 0.15
+  max_sector: 0.30
+  max_gross: 1.00
+  max_quote_deviation: 0.005
+  ticket_ttl_minutes: 30
+
+broker:
+  host: 127.0.0.1
+  port: 7497
+  client_id: 71
+  account: ""
+
+telegram_allowlist: []
+
+markets:
+  XNYS:
+    calendar: XNYS
+    ibkr_exchanges: [NYSE, NASDAQ, ARCA]
+    watchlist: [SPY, NVDA, MSFT]
+  XTKS:
+    calendar: XTKS
+    ibkr_exchanges: [TSEJ, TSE]
+    watchlist: [7203.T]

@@ -1,0 +1,13 @@
+[Unit]
+Description=OpenBB MCP Server
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/uvx --from openbb-mcp-server==1.4.1 --with openbb==4.7.2 openbb-mcp --host 127.0.0.1 --port 8001 --allowed-categories equity,news,economy --tool-discovery
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+
