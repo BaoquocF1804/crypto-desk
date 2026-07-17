@@ -446,6 +446,48 @@ def test_unpriced_spot_balance_blocks_submission(tmp_path):
     assert broker.place_calls == 0
 
 
+def test_sell_is_allowed_with_unpriced_dust_present(tmp_path):
+    broker = FakeBroker("testnet")
+    broker.positions = (
+        {
+            "asset": "BTC",
+            "symbol": "BTCUSDT",
+            "free": "0.00100000",
+            "locked": "0",
+            "total": "0.00100000",
+            "mid_usdt": "100000",
+            "value_usdt": "100",
+        },
+        {
+            "asset": "AIRDROP",
+            "symbol": "AIRDROPUSDT",
+            "free": "1",
+            "locked": "0",
+            "total": "1",
+            "mid_usdt": "0",
+            "value_usdt": "0",
+            "unpriced": True,
+            "unpriced_reason": "no_usdt_pair",
+        },
+    )
+    ticket = replace(
+        make_ticket(),
+        intent="REDUCE",
+        side="SELL",
+        risk_snapshot={"protection_list_client_order_id": "789"},
+    )
+    service, _, _ = make_service(
+        tmp_path,
+        testnet_enabled=True,
+        broker=broker,
+        ticket=ticket,
+    )
+
+    result = service.approve("ticket-1", actor="owner", channel="local")
+
+    assert result.status == "FILLED"
+
+
 def test_unknown_submission_is_reconciled_without_resubmission(tmp_path):
     broker = FakeBroker("testnet")
     broker.timeout = True

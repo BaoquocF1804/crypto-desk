@@ -325,6 +325,9 @@ class CryptoDeskService:
                 continue
             stop_prices.setdefault(str(order.get("symbol")), []).append(Decimal(str(raw_stop)))
         for position in snapshot.positions:
+            if position.get("unpriced"):
+                alerts.append(f"unpriced_asset:{position.get('asset')}")
+                continue
             symbol = str(position.get("symbol", ""))
             value = Decimal(position.get("value_usdt", "0"))
             if not symbol or value <= 0:
@@ -406,7 +409,9 @@ class CryptoDeskService:
         portfolio = self.store.latest_snapshot(self.settings.binance.environment)
         if portfolio is None or portfolio.environment != self.settings.binance.environment:
             return None
-        if any(position.get("unpriced") for position in portfolio.positions):
+        if decision.action == "ACCUMULATE" and any(
+            position.get("unpriced") for position in portfolio.positions
+        ):
             return None
         portfolio_as_of = datetime.fromisoformat(portfolio.as_of).astimezone(UTC)
         if portfolio_as_of > now or now - portfolio_as_of > timedelta(minutes=5):

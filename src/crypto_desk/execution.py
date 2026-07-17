@@ -291,7 +291,7 @@ class ExecutionService:
         account = self.broker.account_snapshot()
         if account.environment != ticket.environment:
             raise ValueError("Account snapshot environment mismatch")
-        if any(position.get("unpriced") for position in account.positions):
+        if ticket.side == "BUY" and any(position.get("unpriced") for position in account.positions):
             raise ValueError("Account contains unpriced Spot balances")
         current_gross = sum(
             (Decimal(position.get("value_usdt", "0")) for position in account.positions),

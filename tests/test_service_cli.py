@@ -544,6 +544,46 @@ def test_health_reports_broker_failure_without_leaking_exception_text(tmp_path):
     assert "sensitive upstream detail" not in json.dumps(result)
 
 
+def test_health_flags_unpriced_positions(tmp_path: Path):
+    class UnpricedBroker(FakeBroker):
+        def account_snapshot(self) -> PortfolioSnapshot:
+            return PortfolioSnapshot(
+                environment="testnet",
+                nav_usdt=Decimal("10000"),
+                free_usdt=Decimal("10000"),
+                positions=(
+                    {
+                        "asset": "AIRDROP",
+                        "symbol": "AIRDROPUSDT",
+                        "free": "5",
+                        "locked": "0",
+                        "total": "5",
+                        "mid_usdt": "0",
+                        "value_usdt": "0",
+                        "unpriced": True,
+                        "unpriced_reason": "no_usdt_pair",
+                    },
+                ),
+                open_orders=(),
+                as_of=NOW.isoformat(),
+            )
+
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    service = CryptoDeskService(
+        settings,
+        store,
+        broker=UnpricedBroker(),
+        evidence_builder=FakeBuilder(),
+        committee=FakeCommittee(),
+        now=lambda: NOW,
+    )
+
+    result = service.health()
+
+    assert "unpriced_asset:AIRDROP" in result["alerts"]
+
+
 def test_reflection_calculates_return_excursions_and_benchmark_alpha():
     result = calculate_reflection(
         entry=Decimal("100"),
