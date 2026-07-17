@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -240,6 +241,30 @@ def test_valid_mainnet_telegram_approval_submits_once(tmp_path):
             code=code,
         )
     assert broker.place_calls == 1
+
+
+def test_mainnet_initial_cap_blocks_ticket_over_twenty_five_usdt(tmp_path):
+    ticket = replace(
+        make_ticket("mainnet"),
+        quantity=Decimal("0.00026"),
+        notional_usdt=Decimal("26.0000000"),
+    )
+    service, _, broker = make_service(
+        tmp_path,
+        environment="mainnet",
+        live_enabled=True,
+        ticket=ticket,
+    )
+
+    with pytest.raises(ValueError, match="risk room|25 USDT"):
+        service.approve(
+            "ticket-1",
+            actor="owner",
+            channel="telegram",
+            code=confirmation_code(SECRET, "ticket-1", NOW),
+        )
+
+    assert broker.place_calls == 0
 
 
 def test_testnet_disabled_records_dry_run_without_broker_calls(tmp_path):

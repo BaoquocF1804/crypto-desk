@@ -159,9 +159,48 @@ def reject(
 
 
 @app.command()
-def orders(ctx: typer.Context) -> None:
+def orders(
+    ctx: typer.Context,
+    reconcile: Annotated[
+        bool,
+        typer.Option("--reconcile", help="Chỉ tra cứu lại order chain chưa terminal."),
+    ] = False,
+) -> None:
     settings = _load(ctx)
-    _emit(ctx, Store(settings.database).list_submissions())
+    store = Store(settings.database)
+    submissions = store.list_submissions()
+    store.close()
+    if not reconcile:
+        _emit(ctx, submissions)
+        return
+
+    terminal = {"FILLED", "EXPIRED", "CANCELED", "REJECTED", "FAILED_SAFE"}
+    service = _execution_service(settings)
+    results = []
+    errors = []
+    for submission in submissions:
+        if submission["status"] in terminal:
+            continue
+        try:
+            results.append(service.reconcile(submission["ticket_id"]))
+        except Exception as exc:
+            errors.append(
+                {
+                    "ticket_id": submission["ticket_id"],
+                    "error": type(exc).__name__,
+                }
+            )
+    refreshed = Store(settings.database)
+    current = refreshed.list_submissions()
+    refreshed.close()
+    _emit(
+        ctx,
+        {
+            "orders": current,
+            "reconciled": results,
+            "errors": errors,
+        },
+    )
 
 
 @app.command("live-code")
@@ -239,7 +278,7 @@ def doctor_report(
         },
         "schedule": to_jsonable(settings.schedule),
         "hermes": {
-            "installed": shutil.which("hermes") is not None,
+            "installed": _hermes_installed(),
         },
     }
     if online:
@@ -420,3 +459,10 @@ def _utcnow():
     from .domain import utcnow
 
     return utcnow()
+
+
+def _hermes_installed(*, home: Path | None = None) -> bool:
+    if shutil.which("hermes") is not None:
+        return True
+    candidate = (home or Path.home()) / ".local" / "bin" / "hermes"
+    return candidate.is_file() and os.access(candidate, os.X_OK)

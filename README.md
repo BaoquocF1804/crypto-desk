@@ -172,6 +172,14 @@ LIVE_EXECUTION_ENABLED=0
 Khởi động lại scheduler/gateway sau khi đổi `.env`, rồi chạy `doctor`. Thao tác
 rollback không xóa database hay artifacts cũ.
 
+Runbook có trạng thái và vị trí ghi bằng chứng:
+
+- [Binance Spot Testnet E2E](docs/runbooks/binance-testnet-e2e.md)
+- [Binance Spot Mainnet Canary](docs/runbooks/binance-mainnet-canary.md)
+
+Mainnet runbook không phải là ủy quyền thực thi. Canary chỉ được chạy khi có chỉ
+thị riêng sau khi bằng chứng Testnet đã được duyệt.
+
 ## Kiểm thử
 
 ```bash

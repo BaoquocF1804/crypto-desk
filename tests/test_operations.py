@@ -101,3 +101,16 @@ def test_skill_ui_metadata_is_valid() -> None:
     assert interface["display_name"] == "Crypto Desk"
     assert 25 <= len(interface["short_description"]) <= 64
     assert "$crypto-desk" in interface["default_prompt"]
+
+
+def test_runbooks_cover_testnet_recovery_and_separate_mainnet_authorization() -> None:
+    testnet = (ROOT / "docs" / "runbooks" / "binance-testnet-e2e.md").read_text(encoding="utf-8")
+    mainnet = (ROOT / "docs" / "runbooks" / "binance-mainnet-canary.md").read_text(encoding="utf-8")
+
+    assert "RECONCILE_REQUIRED" in testnet
+    assert "orders --reconcile" in testnet
+    assert "listClientOrderId" in testnet
+    assert "Không tự gửi lại" in testnet
+    assert "ủy quyền riêng" in mainnet
+    assert "25 USDT" in mainnet
+    assert "LIVE_EXECUTION_ENABLED=0" in mainnet

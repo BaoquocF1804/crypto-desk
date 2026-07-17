@@ -8,7 +8,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from crypto_desk.broker import SpotQuote
-from crypto_desk.cli import app
+from crypto_desk.cli import _hermes_installed, app
 from crypto_desk.config import Settings
 from crypto_desk.data import EvidenceError, EvidenceSnapshot
 from crypto_desk.domain import (
@@ -187,6 +187,62 @@ def test_public_commands_exist():
         "reflections",
     ):
         assert command in result.stdout
+
+
+def test_orders_reconcile_queries_only_nonterminal_submissions(
+    tmp_path: Path,
+    monkeypatch,
+):
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"database: {tmp_path / 'crypto.sqlite3'}\nsymbols: [BTCUSDT]\n",
+        encoding="utf-8",
+    )
+    store = Store(tmp_path / "crypto.sqlite3")
+    store.save_submission(
+        "open-ticket",
+        "testnet",
+        "cdt-open-ticket",
+        {"status": "RECONCILE_REQUIRED"},
+    )
+    store.save_submission(
+        "done-ticket",
+        "testnet",
+        "cdt-done-ticket",
+        {"status": "FILLED", "_reconciled": True},
+    )
+    store.close()
+
+    class FakeExecution:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def reconcile(self, ticket_id: str):
+            self.calls.append(ticket_id)
+            return {"ticket_id": ticket_id, "status": "SUBMITTED"}
+
+    execution = FakeExecution()
+    monkeypatch.setattr(
+        "crypto_desk.cli._execution_service",
+        lambda settings: execution,
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "--config",
+            str(config),
+            "--json",
+            "orders",
+            "--reconcile",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert execution.calls == ["open-ticket"]
+    assert json.loads(result.stdout)["reconciled"] == [
+        {"status": "SUBMITTED", "ticket_id": "open-ticket"}
+    ]
 
 
 def test_analyze_rejects_symbol_outside_allowlist(tmp_path: Path):
@@ -469,3 +525,16 @@ def test_json_doctor_reports_secret_presence_without_values(
     assert payload["binance"]["credentials_present"] is True
     assert "never-print-key" not in result.stdout
     assert "never-print-secret" not in result.stdout
+
+
+def test_doctor_finds_hermes_in_user_local_bin_when_path_is_minimal(
+    tmp_path: Path,
+    monkeypatch,
+):
+    binary = tmp_path / ".local" / "bin" / "hermes"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    binary.chmod(0o755)
+    monkeypatch.setattr("crypto_desk.cli.shutil.which", lambda command: None)
+
+    assert _hermes_installed(home=tmp_path) is True
