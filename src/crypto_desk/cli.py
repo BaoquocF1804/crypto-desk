@@ -20,7 +20,7 @@ from .committee import CryptoCommittee, OpenAIStructuredClient
 from .config import Settings, load_settings
 from .data import EvidenceBuilder, PublicDataClient
 from .domain import to_jsonable
-from .execution import ExecutionService, confirmation_code
+from .execution import ExecutionService, confirmation_code, telegram_approval_proof
 from .service import AnalysisRun, CryptoDeskService
 from .store import Store
 
@@ -123,8 +123,24 @@ def approve(
     actor: Annotated[str, typer.Option("--actor")] = "local-operator",
     channel: Annotated[str, typer.Option("--channel")] = "local",
     code: Annotated[str | None, typer.Option("--code")] = None,
+    telegram_proof: Annotated[
+        str | None,
+        typer.Option("--telegram-proof", hidden=True),
+    ] = None,
 ) -> None:
     settings = _load(ctx)
+    if (
+        telegram_proof is None
+        and channel == "telegram"
+        and code is not None
+        and (ingress_secret := os.getenv("HERMES_TELEGRAM_INGRESS_SECRET"))
+    ):
+        telegram_proof = telegram_approval_proof(
+            ingress_secret,
+            ticket_id,
+            actor,
+            code,
+        )
     service = _execution_service(settings)
     try:
         result = service.approve(
@@ -132,6 +148,7 @@ def approve(
             actor=actor,
             channel=channel,
             code=code,
+            telegram_proof=telegram_proof,
         )
     except ValueError as exc:
         _fail(str(exc))
@@ -274,6 +291,7 @@ def doctor_report(
         },
         "telegram": {
             "token_present": bool(os.getenv("TELEGRAM_BOT_TOKEN")),
+            "trusted_ingress_present": bool(os.getenv("HERMES_TELEGRAM_INGRESS_SECRET")),
             "allowlist_count": len(settings.telegram_allowlist),
         },
         "schedule": to_jsonable(settings.schedule),
@@ -382,7 +400,7 @@ def _service(
         PublicDataClient(settings.news_feeds),
         settings.coingecko_ids,
     )
-    selected_broker = BinanceSpotBroker(settings.binance.environment) if broker else None
+    selected_broker = _broker(settings) if broker else None
     selected_committee = None
     if committee:
         selected_committee = CryptoCommittee(
@@ -411,8 +429,17 @@ def _service(
 
 def _execution_service(settings: Settings) -> ExecutionService:
     store = Store(settings.database)
-    broker = BinanceSpotBroker(settings.binance.environment)
+    broker = _broker(settings)
     return ExecutionService(store, broker, settings)
+
+
+def _broker(settings: Settings) -> BinanceSpotBroker:
+    selected = os.getenv("BINANCE_ENV")
+    if selected not in {"testnet", "mainnet"}:
+        raise ValueError("BINANCE_ENV must be testnet or mainnet")
+    if selected != settings.binance.environment:
+        raise ValueError("BINANCE_ENV does not match config binance.environment")
+    return BinanceSpotBroker(selected)
 
 
 def _load(ctx: typer.Context) -> Settings:

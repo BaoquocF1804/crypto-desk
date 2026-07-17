@@ -37,6 +37,8 @@ Giới hạn 25 USDT chỉ được gỡ tự động sau ít nhất 20 Mainnet 
 - Mainnet key chỉ có Spot trading, withdrawal bị tắt, không có Margin/derivatives
   permission và có IP restriction.
 - `TELEGRAM_HOME_CHANNEL` và user allowlist đã được kiểm tra.
+- Hermes gateway process được inject riêng `HERMES_TELEGRAM_INGRESS_SECRET`;
+  direct CLI shell không có secret/proof bị chặn.
 - Chủ tài khoản đã xem ticket, entry/stop/target và chấp nhận rủi ro.
 - Có lệnh rollback sẵn trước khi submit.
 

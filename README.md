@@ -46,7 +46,10 @@ Nếu sau này dùng Mainnet, tạo một API key riêng chỉ có quyền Spot 
 
 Đặt `OPENAI_API_KEY`, tùy chọn `COINGECKO_DEMO_API_KEY`, danh sách RSS trong
 `config.yaml`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_HOME_CHANNEL` và Telegram user ID
-trong `telegram_allowlist`. Không commit `.env` hoặc `config.yaml`.
+trong `telegram_allowlist`. Chỉ process Hermes gateway được inject
+`HERMES_TELEGRAM_INGRESS_SECRET`; không đặt secret này trong `.env` của project,
+shell tương tác hoặc nội dung tin nhắn. CLI dùng nó để ký approval metadata trong
+process và không in proof. Không commit `.env` hoặc `config.yaml`.
 
 Kiểm tra cấu hình offline trước:
 
@@ -88,7 +91,7 @@ Mainnet cần đồng thời đủ ba cổng:
 1. `BINANCE_ENV=mainnet`;
 2. `LIVE_EXECUTION_ENABLED=1`;
 3. approval từ Telegram user trong allowlist kèm confirmation code còn hạn năm
-   phút.
+   phút và HMAC proof do trusted Telegram ingress tạo.
 
 Confirmation code chỉ được tạo cục bộ:
 
@@ -103,7 +106,8 @@ Sau đó Telegram user đã xác thực gửi:
 ```
 
 Hermes lấy user ID từ metadata Telegram; tham số sau ticket luôn là code, không
-phải user ID. Không gửi code vào log hoặc chat khác.
+phải user ID. Direct CLI tự khai `--channel telegram` không tạo được proof và bị
+chặn ở Mainnet. Không gửi code hoặc proof vào log/chat.
 
 Nếu submit timeout hoặc trạng thái không rõ, ticket chuyển sang
 `RECONCILE_REQUIRED`. Không approve lại và không gửi lại lệnh. Dùng
@@ -120,6 +124,11 @@ ln -s "$PWD/hermes/crypto-desk" ~/.hermes/skills/crypto-desk
 ln -s "$PWD/scripts/health.sh" ~/.hermes/scripts/crypto-desk-health.sh
 ln -s "$PWD/scripts/daily.sh" ~/.hermes/scripts/crypto-desk-daily.sh
 ```
+
+Giữ ingress secret ngoài project `.env` và chỉ inject vào gateway service, ví dụ
+qua một `EnvironmentFile` quyền `0600` trong systemd user override. Shell chạy
+`desk` thủ công không được source file này. Sau khi restart gateway, `doctor` chạy
+trong cùng service context phải báo `trusted_ingress_present=true`.
 
 Tạo đúng hai cron job UTC:
 

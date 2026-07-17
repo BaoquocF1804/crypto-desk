@@ -47,7 +47,10 @@ class _OfficialRestApi:
 
         def call(**wire_params: Any):
             python_params = {_camel_to_snake(key): value for key, value in wire_params.items()}
-            return target(**python_params)
+            try:
+                return target(**python_params)
+            except Exception as exc:
+                raise BrokerError("Binance SDK request failed") from exc
 
         return call
 
@@ -113,8 +116,22 @@ class BinanceSpotBroker:
                 mid = Decimal("1")
                 free_usdt = free
             else:
-                quote = self.latest_quote(f"{asset}USDT")
-                mid = quote.mid
+                symbol = f"{asset}USDT"
+                if symbol not in V1_SYMBOLS:
+                    positions.append(
+                        {
+                            "asset": asset,
+                            "symbol": symbol,
+                            "free": str(free),
+                            "locked": str(locked),
+                            "total": str(total),
+                            "mid_usdt": "0",
+                            "value_usdt": "0",
+                            "unpriced": True,
+                        }
+                    )
+                    continue
+                mid = self.latest_quote(symbol).mid
             value = total * mid
             nav += value
             if asset != "USDT":
@@ -197,36 +214,44 @@ class BinanceSpotBroker:
     def place_entry_otoco(self, ticket: TradeTicket) -> dict[str, Any]:
         self._validate_ticket(ticket, side="BUY")
         ids = self._client_ids(ticket.id)
-        response = self._client.rest_api.order_list_otoco(
-            symbol=ticket.symbol,
-            workingType="LIMIT",
-            workingSide="BUY",
-            workingPrice=str(ticket.limit_price),
-            workingQuantity=str(ticket.quantity),
-            pendingSide="SELL",
-            pendingQuantity=str(ticket.quantity),
-            pendingAboveType="LIMIT_MAKER",
-            pendingAbovePrice=str(ticket.target_price),
-            pendingBelowType="STOP_LOSS",
-            pendingBelowStopPrice=str(ticket.stop_price),
-            workingTimeInForce="FOK",
-            listClientOrderId=ids["list"],
-            workingClientOrderId=ids["working"],
-            pendingAboveClientOrderId=ids["target"],
-            pendingBelowClientOrderId=ids["stop"],
-        )
+        try:
+            response = self._client.rest_api.order_list_otoco(
+                symbol=ticket.symbol,
+                workingType="LIMIT",
+                workingSide="BUY",
+                workingPrice=str(ticket.limit_price),
+                workingQuantity=str(ticket.quantity),
+                pendingSide="SELL",
+                pendingQuantity=str(ticket.quantity),
+                pendingAboveType="LIMIT_MAKER",
+                pendingAbovePrice=str(ticket.target_price),
+                pendingBelowType="STOP_LOSS",
+                pendingBelowStopPrice=str(ticket.stop_price),
+                workingTimeInForce="FOK",
+                listClientOrderId=ids["list"],
+                workingClientOrderId=ids["working"],
+                pendingAboveClientOrderId=ids["target"],
+                pendingBelowClientOrderId=ids["stop"],
+            )
+        except Exception as exc:
+            raise BrokerError("Binance OTOCO submission failed") from exc
         return _expect_dict(response, "OTOCO")
 
     def cancel_order_list(
         self,
         symbol: str,
-        list_client_order_id: str,
+        list_reference: str,
     ) -> dict[str, Any]:
         self._validate_symbol(symbol)
+        reference = (
+            {"orderListId": int(list_reference)}
+            if list_reference.isdigit()
+            else {"listClientOrderId": list_reference}
+        )
         return _expect_dict(
             self._client.rest_api.delete_order_list(
                 symbol=symbol,
-                listClientOrderId=list_client_order_id,
+                **reference,
             ),
             "cancel order list",
         )
@@ -234,8 +259,8 @@ class BinanceSpotBroker:
     def place_exit_fok(self, ticket: TradeTicket) -> dict[str, Any]:
         self._validate_ticket(ticket, side="SELL")
         ids = self._client_ids(ticket.id)
-        return _expect_dict(
-            self._client.rest_api.new_order(
+        try:
+            response = self._client.rest_api.new_order(
                 symbol=ticket.symbol,
                 side="SELL",
                 type="LIMIT",
@@ -243,9 +268,10 @@ class BinanceSpotBroker:
                 quantity=str(ticket.quantity),
                 price=str(ticket.limit_price),
                 newClientOrderId=ids["exit"],
-            ),
-            "exit order",
-        )
+            )
+        except Exception as exc:
+            raise BrokerError("Binance exit submission failed") from exc
+        return _expect_dict(response, "exit order")
 
     def place_protection_oco(
         self,
@@ -278,8 +304,58 @@ class BinanceSpotBroker:
             "order chain",
         )
 
-    def client_order_id(self, ticket_id: str) -> str:
-        return self._client_ids(ticket_id)["list"]
+    def client_order_id(self, ticket_id: str, side: str = "BUY") -> str:
+        return self._client_ids(ticket_id)["exit" if side == "SELL" else "list"]
+
+    def submission_status(
+        self,
+        ticket: TradeTicket,
+        client_order_id: str,
+    ) -> dict[str, Any]:
+        if ticket.side == "SELL":
+            payload = _expect_dict(
+                self._client.rest_api.get_order(
+                    symbol=ticket.symbol,
+                    origClientOrderId=client_order_id,
+                ),
+                "exit order",
+            )
+            return {**payload, "status": str(payload.get("status", "SUBMITTED")).upper()}
+
+        order_list = self.order_chain(client_order_id)
+        orders = []
+        for order in order_list.get("orders", []):
+            orders.append(
+                _expect_dict(
+                    self._client.rest_api.get_order(
+                        symbol=ticket.symbol,
+                        origClientOrderId=order["clientOrderId"],
+                    ),
+                    "order",
+                )
+            )
+        working = next(
+            (order for order in orders if str(order.get("clientOrderId", "")).endswith("-w")),
+            None,
+        )
+        if working is None:
+            raise BrokerError("OTOCO working order is missing")
+        working_status = str(working.get("status", "")).upper()
+        if working_status in {"EXPIRED", "CANCELED", "REJECTED"}:
+            status = working_status
+        elif working_status != "FILLED":
+            status = "SUBMITTED"
+        elif any(
+            str(order.get("status", "")).upper() == "FILLED"
+            for order in orders
+            if order is not working
+        ):
+            status = "FILLED"
+        elif str(order_list.get("listStatusType", "")).upper() == "ALL_DONE":
+            status = "RECONCILE_REQUIRED"
+        else:
+            status = "SUBMITTED"
+        return {**order_list, "orders_detail": orders, "status": status}
 
     def _client_ids(self, ticket_id: str) -> dict[str, str]:
         environment_code = "t" if self.environment == "testnet" else "m"

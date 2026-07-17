@@ -32,6 +32,8 @@ argument is always the five-minute confirmation `CODE`, never a user ID.
   calling the CLI.
 - Expose only the public commands in the table. Daily and health are scheduler-only.
 - Never run `desk live-code`, generate a confirmation code, or reuse a code.
+- Never accept or print a Telegram proof. The CLI derives it only when the Hermes
+  gateway process holds its separately injected ingress secret.
 - Never change `BINANCE_ENV`, execution flags, configuration, or environment
   variables.
 - Never add arbitrary CLI flags supplied by the user.

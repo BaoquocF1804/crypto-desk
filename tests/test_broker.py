@@ -25,10 +25,11 @@ def fixture(name: str) -> Any:
 class FakeRest:
     def __init__(self):
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.account = fixture("binance_account.json")
 
     def get_account(self, **kwargs):
         self.calls.append(("get_account", kwargs))
-        return fixture("binance_account.json")
+        return self.account
 
     def get_open_orders(self, **kwargs):
         self.calls.append(("get_open_orders", kwargs))
@@ -65,6 +66,12 @@ class FakeRest:
     def get_order_list(self, **kwargs):
         self.calls.append(("get_order_list", kwargs))
         return fixture("binance_order_list_status.json")
+
+    def get_order(self, **kwargs):
+        self.calls.append(("get_order", kwargs))
+        client_id = kwargs["origClientOrderId"]
+        status = "FILLED" if client_id.endswith(("-w", "-t", "-e")) else "CANCELED"
+        return {"symbol": kwargs["symbol"], "clientOrderId": client_id, "status": status}
 
 
 class FakeSdk:
@@ -144,6 +151,19 @@ def test_account_snapshot_values_free_and_locked_balances_in_usdt(
     assert btc["free"] == "0.00100000"
     assert btc["locked"] == "0.00020000"
     assert btc["value_usdt"] == "120.00000000"
+
+
+def test_unallowlisted_dust_is_recorded_unpriced_without_breaking_sync(
+    testnet_env,
+    sdk,
+):
+    sdk.rest_api.account["balances"].append({"asset": "DUST", "free": "1", "locked": "0"})
+
+    snapshot = BinanceSpotBroker("testnet", client=sdk).account_snapshot()
+
+    dust = next(position for position in snapshot.positions if position["asset"] == "DUST")
+    assert dust["unpriced"] is True
+    assert dust["value_usdt"] == "0"
 
 
 def test_symbol_rules_and_latest_quote_are_decimal_safe(testnet_env, sdk):
@@ -233,3 +253,16 @@ def test_exit_protection_cancel_and_reconcile_use_narrow_spot_calls(
     assert calls["order_list_oco"]["quantity"] == "0.00010"
     assert calls["delete_order_list"]["listClientOrderId"] == "cdt-existing"
     assert calls["get_order_list"]["origClientOrderId"] == "cdt-existing"
+
+
+def test_reconcile_derives_terminal_state_from_individual_otoco_orders(
+    testnet_env,
+    sdk,
+    ticket,
+):
+    broker = BinanceSpotBroker("testnet", client=sdk)
+
+    result = broker.submission_status(ticket, "cdt-fixture")
+
+    assert result["status"] == "FILLED"
+    assert len(result["orders_detail"]) == 3

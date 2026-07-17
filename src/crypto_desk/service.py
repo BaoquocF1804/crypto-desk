@@ -20,6 +20,7 @@ from .domain import (
     utcnow,
 )
 from .execution import ExecutionService
+from .risk import build_ticket, size_buy, size_sell
 from .screener import ScreenResult, screen
 from .store import Store
 
@@ -30,6 +31,7 @@ class AnalysisRun:
     cutoff: str
     decision: ResearchDecision
     report_dir: Path
+    ticket_id: str | None = None
 
 
 class CryptoDeskService:
@@ -164,11 +166,13 @@ class CryptoDeskService:
             decision,
             report_dir,
         )
+        ticket_id = self._create_ticket(decision, snapshot, effective_cutoff)
         return AnalysisRun(
             run_id=run_id,
             cutoff=iso(effective_cutoff),
             decision=decision,
             report_dir=report_dir,
+            ticket_id=ticket_id,
         )
 
     def daily(
@@ -240,6 +244,8 @@ class CryptoDeskService:
                     "SUBMISSION_UNKNOWN",
                     "RECONCILE_REQUIRED",
                     "SUBMITTED",
+                    "PROTECTION_CANCELED",
+                    "EXIT_SUBMITTING",
                 )
             ):
                 try:
@@ -385,6 +391,93 @@ class CryptoDeskService:
             ),
             Decimal("0"),
         )
+
+    def _create_ticket(
+        self,
+        decision: ResearchDecision,
+        evidence: EvidenceSnapshot | None,
+        cutoff: datetime,
+    ) -> str | None:
+        if decision.action not in {"ACCUMULATE", "REDUCE", "EXIT"} or evidence is None:
+            return None
+        now = self._now()
+        if cutoff > now or now - cutoff > timedelta(minutes=5):
+            return None
+        portfolio = self.store.latest_snapshot(self.settings.binance.environment)
+        if portfolio is None or portfolio.environment != self.settings.binance.environment:
+            return None
+        if any(position.get("unpriced") for position in portfolio.positions):
+            return None
+        portfolio_as_of = datetime.fromisoformat(portfolio.as_of).astimezone(UTC)
+        if portfolio_as_of > now or now - portfolio_as_of > timedelta(minutes=5):
+            return None
+        assert decision.entry is not None
+        assert decision.stop is not None
+        current_gross = sum(
+            (Decimal(position.get("value_usdt", "0")) for position in portfolio.positions),
+            Decimal("0"),
+        )
+        current_symbol = sum(
+            (
+                Decimal(position.get("value_usdt", "0"))
+                for position in portfolio.positions
+                if position.get("symbol") == decision.symbol
+            ),
+            Decimal("0"),
+        )
+        current_quantity = self._position_quantity(decision.symbol)
+        try:
+            risk_snapshot: dict[str, Any] = {
+                "portfolio_as_of": portfolio.as_of,
+            }
+            if decision.action == "ACCUMULATE":
+                sizing = size_buy(
+                    environment=self.settings.binance.environment,
+                    nav_usdt=portfolio.nav_usdt,
+                    free_usdt=portfolio.free_usdt,
+                    entry=decision.entry,
+                    stop=decision.stop,
+                    current_symbol_value=current_symbol,
+                    current_gross_value=current_gross,
+                    mainnet_order_cap_usdt=self.settings.risk.mainnet_initial_order_cap_usdt,
+                    completed_mainnet_chains=self.store.completed_mainnet_chains(),
+                    risk=self.settings.risk,
+                    rules=evidence.rules,
+                )
+            else:
+                protection_ids = {
+                    str(order["orderListId"])
+                    for order in portfolio.open_orders
+                    if order.get("symbol") == decision.symbol
+                    and str(order.get("side", "")).upper() == "SELL"
+                    and int(order.get("orderListId", -1)) >= 0
+                }
+                if len(protection_ids) != 1:
+                    return None
+                risk_snapshot["protection_list_client_order_id"] = protection_ids.pop()
+                sizing = size_sell(
+                    action=decision.action,
+                    free_base=current_quantity,
+                    price=decision.entry,
+                    rules=evidence.rules,
+                )
+            ticket = build_ticket(
+                environment=self.settings.binance.environment,
+                decision=decision,
+                quantity=sizing.quantity,
+                current_position_quantity=current_quantity,
+                rules=evidence.rules,
+                risk_snapshot={
+                    **risk_snapshot,
+                    "limiting_rule": sizing.limiting_rule,
+                    "rooms": sizing.rooms,
+                },
+                ttl_minutes=self.settings.risk.ticket_ttl_minutes,
+            )
+        except ValueError:
+            return None
+        self.store.save_ticket(ticket)
+        return ticket.id
 
     def _require_builder(self) -> Any:
         if self.evidence_builder is None:

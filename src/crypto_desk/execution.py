@@ -48,6 +48,21 @@ def verify_confirmation_code(
     return hmac.compare_digest(expected, supplied)
 
 
+def telegram_approval_proof(
+    secret: str,
+    ticket_id: str,
+    actor: str,
+    code: str,
+) -> str:
+    if not secret:
+        raise ValueError("Trusted Telegram ingress secret is required")
+    return hmac.new(
+        secret.encode(),
+        f"{ticket_id}:{actor}:{code}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+
 class ExecutionService:
     def __init__(
         self,
@@ -59,6 +74,8 @@ class ExecutionService:
         live_enabled: bool | None = None,
         testnet_enabled: bool | None = None,
         confirmation_secret: str | None = None,
+        environment_gate: str | None = None,
+        telegram_approval_secret: str | None = None,
     ):
         self.store = store
         self.broker = broker
@@ -77,6 +94,12 @@ class ExecutionService:
             if confirmation_secret is not None
             else os.getenv("LIVE_CONFIRMATION_SECRET")
         )
+        self.environment_gate = environment_gate or os.getenv("BINANCE_ENV")
+        self._telegram_approval_secret = (
+            telegram_approval_secret
+            if telegram_approval_secret is not None
+            else os.getenv("HERMES_TELEGRAM_INGRESS_SECRET")
+        )
 
     def approve(
         self,
@@ -85,6 +108,7 @@ class ExecutionService:
         actor: str,
         channel: str,
         code: str | None = None,
+        telegram_proof: str | None = None,
     ) -> ExecutionResult:
         ticket = self._pending_ticket(ticket_id)
         self._validate_actor(actor, channel, ticket)
@@ -95,6 +119,8 @@ class ExecutionService:
             raise ValueError("Broker environment does not match BINANCE_ENV")
 
         if ticket.environment == "mainnet":
+            if self.environment_gate != "mainnet":
+                raise ValueError("BINANCE_ENV must independently select mainnet")
             if not self.live_enabled:
                 raise ValueError("Mainnet execution is disabled")
             if channel != "telegram":
@@ -108,6 +134,20 @@ class ExecutionService:
                 self._now(),
             ):
                 raise ValueError("Mainnet confirmation code is invalid")
+            if (
+                not self._telegram_approval_secret
+                or telegram_proof is None
+                or not hmac.compare_digest(
+                    telegram_approval_proof(
+                        self._telegram_approval_secret,
+                        ticket.id,
+                        actor,
+                        code,
+                    ),
+                    telegram_proof,
+                )
+            ):
+                raise ValueError("Mainnet approval lacks trusted Telegram proof")
         elif not self.testnet_enabled:
             self.store.record_approval(
                 ticket.id,
@@ -121,7 +161,7 @@ class ExecutionService:
                 payload={"status": "APPROVED_DRY_RUN"},
             )
 
-        client_order_id = self.broker.client_order_id(ticket.id)
+        client_order_id = self.broker.client_order_id(ticket.id, ticket.side)
         if self.store.submission(ticket.id) is not None:
             raise ValueError(f"Ticket {ticket.id} is already submitted")
         if (
@@ -162,6 +202,8 @@ class ExecutionService:
             return self._reconcile_submission(ticket.id, client_order_id)
 
         status = _normalized_status(payload, default="SUBMITTED")
+        if ticket.side == "SELL":
+            status, payload = self._finalize_sell(ticket, rules, status, payload)
         recorded_payload = {**payload, "_reconciled": False}
         self.store.record_order_event(ticket.id, status, recorded_payload)
         return ExecutionResult(ticket.id, status, recorded_payload)
@@ -249,6 +291,8 @@ class ExecutionService:
         account = self.broker.account_snapshot()
         if account.environment != ticket.environment:
             raise ValueError("Account snapshot environment mismatch")
+        if any(position.get("unpriced") for position in account.positions):
+            raise ValueError("Account contains unpriced Spot balances")
         current_gross = sum(
             (Decimal(position.get("value_usdt", "0")) for position in account.positions),
             Decimal("0"),
@@ -279,11 +323,11 @@ class ExecutionService:
             if ticket.quantity > maximum.quantity:
                 raise ValueError("Ticket quantity exceeds current risk room")
         else:
-            free_base = self._free_base(account, rules.base_asset)
+            total_base = self._total_base(account, rules.base_asset)
             action = "REDUCE" if ticket.intent == "REDUCE" else "EXIT"
             maximum = size_sell(
                 action=action,
-                free_base=free_base,
+                free_base=total_base,
                 price=ticket.limit_price,
                 rules=rules,
             )
@@ -317,26 +361,34 @@ class ExecutionService:
         cancel_status = _normalized_status(cancelled, default="UNKNOWN")
         if cancel_status not in {"CANCELED", "ALL_DONE"}:
             raise BrokerError("Protective order cancellation is ambiguous")
+        self.store.record_order_event(
+            ticket.id,
+            "PROTECTION_CANCELED",
+            {"status": "PROTECTION_CANCELED"},
+        )
 
-        result = self.broker.place_exit_fok(ticket)
-        status = _normalized_status(result, default="UNKNOWN")
-        original_free = self._free_base(account, rules.base_asset)
-        if status == "EXPIRED":
-            self.broker.place_protection_oco(ticket, original_free)
-        elif status == "FILLED":
-            refreshed = self.broker.account_snapshot()
-            remaining = self._free_base(refreshed, rules.base_asset)
-            if ticket.intent == "REDUCE" and remaining >= rules.min_qty:
-                self.broker.place_protection_oco(ticket, remaining)
-            if ticket.intent == "CLOSE" and remaining >= rules.min_qty:
-                return {
-                    **result,
-                    "status": "RECONCILE_REQUIRED",
-                    "reason": "EXIT left a sellable free balance",
-                }
-        else:
-            raise BrokerError("Sell order status is ambiguous")
-        return result
+        try:
+            refreshed_before_exit = self.broker.account_snapshot()
+        except Exception as exc:
+            original_total = self._total_base(account, rules.base_asset)
+            try:
+                self.broker.place_protection_oco(ticket, original_total)
+            except Exception:
+                pass
+            raise BrokerError("Post-cancel account refresh failed") from exc
+        original_free = self._free_base(refreshed_before_exit, rules.base_asset)
+        if original_free < ticket.quantity:
+            try:
+                self.broker.place_protection_oco(ticket, original_free)
+            except Exception:
+                pass
+            raise BrokerError("Canceled protection did not release enough balance")
+        self.store.record_order_event(
+            ticket.id,
+            "EXIT_SUBMITTING",
+            {"status": "EXIT_SUBMITTING"},
+        )
+        return self.broker.place_exit_fok(ticket)
 
     def _reconcile_submission(
         self,
@@ -344,10 +396,26 @@ class ExecutionService:
         client_order_id: str,
     ) -> ExecutionResult:
         try:
-            payload = self.broker.order_chain(client_order_id)
+            ticket = self.store.ticket(ticket_id)
+            payload = self.broker.submission_status(ticket, client_order_id)
             if not isinstance(payload, dict) or not payload:
                 raise BrokerError("Empty order-chain response")
         except (TimeoutError, ConnectionError, BrokerError):
+            submission = self.store.submission(ticket_id)
+            ticket = self.store.ticket(ticket_id)
+            if (
+                ticket.side == "SELL"
+                and submission is not None
+                and submission["status"] == "PROTECTION_CANCELED"
+                and self._restore_sell_protection(ticket)
+            ):
+                payload = {
+                    "status": "FAILED_SAFE",
+                    "client_order_id": client_order_id,
+                    "reason": "crash_recovery_restored_protection",
+                }
+                self.store.record_order_event(ticket_id, "FAILED_SAFE", payload)
+                return ExecutionResult(ticket_id, "FAILED_SAFE", payload)
             payload = {
                 "status": "RECONCILE_REQUIRED",
                 "client_order_id": client_order_id,
@@ -364,9 +432,76 @@ class ExecutionService:
             )
 
         status = _normalized_status(payload, default="SUBMITTED")
+        ticket = self.store.ticket(ticket_id)
+        if ticket.side == "SELL":
+            try:
+                rules = self.broker.symbol_rules(ticket.symbol)
+                status, payload = self._finalize_sell(ticket, rules, status, payload)
+            except Exception:
+                status = "RECONCILE_REQUIRED"
+                payload = {
+                    **payload,
+                    "status": status,
+                    "reason": "sell_protection_recovery_failed",
+                }
         recorded_payload = {**payload, "_reconciled": True}
         self.store.record_order_event(ticket_id, status, recorded_payload)
         return ExecutionResult(ticket_id, status, recorded_payload)
+
+    def _restore_sell_protection(self, ticket: TradeTicket) -> bool:
+        try:
+            rules = self.broker.symbol_rules(ticket.symbol)
+            account = self.broker.account_snapshot()
+            remaining = round_down(
+                self._free_base(account, rules.base_asset),
+                rules.step_size,
+            )
+            if remaining < rules.min_qty or remaining * ticket.limit_price < rules.min_notional:
+                return False
+            protection = self.broker.place_protection_oco(ticket, remaining)
+            status = str(
+                protection.get("listStatusType") or protection.get("listOrderStatus") or ""
+            ).upper()
+            return status in {"EXEC_STARTED", "EXECUTING"}
+        except Exception:
+            return False
+
+    def _finalize_sell(
+        self,
+        ticket: TradeTicket,
+        rules: SymbolRules,
+        status: str,
+        payload: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        if status not in {"FILLED", "EXPIRED", "CANCELED", "REJECTED"}:
+            return (
+                "RECONCILE_REQUIRED",
+                {**payload, "status": "RECONCILE_REQUIRED"},
+            )
+        account = self.broker.account_snapshot()
+        remaining = round_down(
+            self._free_base(account, rules.base_asset),
+            rules.step_size,
+        )
+        requires_protection = status != "FILLED" or ticket.intent == "REDUCE"
+        if ticket.intent == "CLOSE" and status == "FILLED" and remaining >= rules.min_qty:
+            requires_protection = True
+            status = "RECONCILE_REQUIRED"
+        if requires_protection and remaining >= rules.min_qty:
+            protection = self.broker.place_protection_oco(ticket, remaining)
+            protection_status = str(
+                protection.get("listStatusType") or protection.get("listOrderStatus") or ""
+            ).upper()
+            if protection_status not in {"EXEC_STARTED", "EXECUTING"}:
+                return (
+                    "RECONCILE_REQUIRED",
+                    {
+                        **payload,
+                        "status": "RECONCILE_REQUIRED",
+                        "reason": "protection_status_ambiguous",
+                    },
+                )
+        return status, {**payload, "status": status}
 
     @staticmethod
     def _free_base(
@@ -376,6 +511,20 @@ class ExecutionService:
         return sum(
             (
                 Decimal(position.get("free", "0"))
+                for position in account.positions
+                if position.get("asset") == base_asset
+            ),
+            Decimal("0"),
+        )
+
+    @staticmethod
+    def _total_base(
+        account: PortfolioSnapshot,
+        base_asset: str,
+    ) -> Decimal:
+        return sum(
+            (
+                Decimal(position.get("total", "0"))
                 for position in account.positions
                 if position.get("asset") == base_asset
             ),

@@ -22,6 +22,7 @@ from crypto_desk.service import (
     CryptoDeskService,
     calculate_reflection,
 )
+from crypto_desk.execution import telegram_approval_proof
 from crypto_desk.store import Store
 
 
@@ -245,6 +246,50 @@ def test_orders_reconcile_queries_only_nonterminal_submissions(
     ]
 
 
+def test_hermes_process_secret_creates_internal_telegram_proof(
+    tmp_path: Path,
+    monkeypatch,
+):
+    config = tmp_path / "config.yaml"
+    config.write_text("symbols: [BTCUSDT]\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_TELEGRAM_INGRESS_SECRET", "ingress-secret")
+
+    class FakeExecution:
+        kwargs = None
+
+        def approve(self, ticket_id: str, **kwargs):
+            self.kwargs = kwargs
+            return {"ticket_id": ticket_id, "status": "APPROVED"}
+
+    execution = FakeExecution()
+    monkeypatch.setattr("crypto_desk.cli._execution_service", lambda settings: execution)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "--config",
+            str(config),
+            "--json",
+            "approve",
+            "ticket-1",
+            "--actor",
+            "998877",
+            "--channel",
+            "telegram",
+            "--code",
+            "654321",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert execution.kwargs["telegram_proof"] == telegram_approval_proof(
+        "ingress-secret",
+        "ticket-1",
+        "998877",
+        "654321",
+    )
+
+
 def test_analyze_rejects_symbol_outside_allowlist(tmp_path: Path):
     config = tmp_path / "config.yaml"
     config.write_text("symbols: [BTCUSDT]\n", encoding="utf-8")
@@ -261,6 +306,16 @@ def test_analyze_rejects_symbol_outside_allowlist(tmp_path: Path):
 def test_analyze_writes_complete_artifact_set_and_store_record(tmp_path):
     settings = make_settings(tmp_path)
     store = Store(settings.database)
+    store.save_snapshot(
+        PortfolioSnapshot(
+            environment="testnet",
+            nav_usdt=Decimal("10000"),
+            free_usdt=Decimal("10000"),
+            positions=(),
+            open_orders=(),
+            as_of=NOW.isoformat(),
+        )
+    )
     committee = FakeCommittee()
     service = CryptoDeskService(
         settings,
@@ -285,6 +340,8 @@ def test_analyze_writes_complete_artifact_set_and_store_record(tmp_path):
     decision = json.loads((result.report_dir / "decision.json").read_text(encoding="utf-8"))
     assert decision["entry"] == "100.00"
     assert store.latest_run("BTCUSDT")["id"] == result.run_id
+    assert result.ticket_id is not None
+    assert store.ticket(result.ticket_id).status == "PENDING"
 
 
 def test_evidence_error_forces_no_trade_without_calling_committee(tmp_path):

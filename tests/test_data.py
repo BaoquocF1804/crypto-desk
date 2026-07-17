@@ -177,13 +177,28 @@ def test_price_deviation_over_half_percent_blocks_trade():
 
 def test_future_timestamp_is_rejected():
     client = FakePublicClient()
-    client.four_hour = replace(
-        client.four_hour,
+    client.funding_result = replace(
+        client.funding_result,
         as_of=CUTOFF + timedelta(seconds=1),
     )
 
     with pytest.raises(EvidenceError, match="future"):
         EvidenceBuilder(client, {"BTCUSDT": "bitcoin"}).build("BTCUSDT", CUTOFF)
+
+
+def test_open_trailing_candles_are_dropped_before_time_leakage_check():
+    client = FakePublicClient()
+    open_close = int((CUTOFF + timedelta(hours=23, minutes=45)).timestamp() * 1000)
+    client.daily = replace(
+        client.daily,
+        as_of=CUTOFF + timedelta(hours=23, minutes=45),
+        payload=[*client.daily.payload, [0, "0", "0", "0", "999999", "0", open_close]],
+    )
+
+    snapshot = EvidenceBuilder(client, {"BTCUSDT": "bitcoin"}).build("BTCUSDT", CUTOFF)
+
+    assert len(snapshot.daily_closes) == 120
+    assert snapshot.daily_closes[-1] != Decimal("999999")
 
 
 def test_missing_open_interest_blocks_evidence():

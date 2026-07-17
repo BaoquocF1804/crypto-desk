@@ -14,12 +14,14 @@ from crypto_desk.execution import (
     ExecutionService,
     confirmation_code,
     verify_confirmation_code,
+    telegram_approval_proof,
 )
 from crypto_desk.store import Store
 
 
 NOW = datetime(2026, 7, 17, 0, 15, tzinfo=UTC)
 SECRET = "local-confirmation-secret"
+TELEGRAM_SECRET = "trusted-telegram-ingress-secret"
 
 
 def make_ticket(
@@ -51,6 +53,7 @@ class FakeBroker:
         self.min_notional = Decimal("5")
         self.place_calls = 0
         self.reconcile_calls = 0
+        self.reconcile_ids: list[str] = []
         self.timeout = False
         self.chain: dict | None = {"status": "FILLED", "orderListId": 123}
         self.positions: tuple[dict[str, str], ...] = ()
@@ -58,9 +61,10 @@ class FakeBroker:
         self.exit_calls = 0
         self.protection_quantities: list[Decimal] = []
 
-    def client_order_id(self, ticket_id: str) -> str:
+    def client_order_id(self, ticket_id: str, side: str = "BUY") -> str:
         prefix = "cdt" if self.environment == "testnet" else "cdm"
-        return f"{prefix}-{ticket_id}"
+        suffix = "-e" if side == "SELL" else ""
+        return f"{prefix}-{ticket_id}{suffix}"
 
     def symbol_rules(self, symbol: str) -> SymbolRules:
         return SymbolRules(
@@ -103,16 +107,25 @@ class FakeBroker:
 
     def order_chain(self, list_client_order_id: str) -> dict:
         self.reconcile_calls += 1
+        self.reconcile_ids.append(list_client_order_id)
         if self.chain is None:
             raise BrokerError("not found")
         return self.chain
 
+    def submission_status(self, ticket: TradeTicket, client_order_id: str) -> dict:
+        return self.order_chain(client_order_id)
+
     def cancel_order_list(self, symbol: str, list_client_order_id: str) -> dict:
         self.cancel_calls += 1
+        if self.positions:
+            total = self.positions[0].get("total", self.positions[0].get("free", "0"))
+            self.positions = ({**self.positions[0], "free": total, "locked": "0"},)
         return {"listStatusType": "ALL_DONE"}
 
     def place_exit_fok(self, ticket: TradeTicket) -> dict:
         self.exit_calls += 1
+        if self.timeout:
+            raise TimeoutError("ambiguous transport timeout")
         remaining = Decimal(self.positions[0]["free"]) - ticket.quantity
         self.positions = (
             {
@@ -143,6 +156,7 @@ def make_service(
     broker: FakeBroker | None = None,
     now: datetime = NOW,
     ticket: TradeTicket | None = None,
+    environment_gate: str | None = "match",
 ) -> tuple[ExecutionService, Store, FakeBroker]:
     selected_broker = broker or FakeBroker(environment)
     settings = Settings(
@@ -160,6 +174,8 @@ def make_service(
         live_enabled=live_enabled,
         testnet_enabled=testnet_enabled,
         confirmation_secret=SECRET,
+        environment_gate=(environment if environment_gate == "match" else environment_gate),
+        telegram_approval_secret=TELEGRAM_SECRET,
     )
     return service, store, selected_broker
 
@@ -195,6 +211,25 @@ def test_mainnet_requires_all_three_gates(
         )
 
 
+def test_mainnet_is_blocked_when_binance_env_gate_is_absent(tmp_path):
+    service, _, broker = make_service(
+        tmp_path,
+        environment="mainnet",
+        live_enabled=True,
+        environment_gate=None,
+    )
+
+    with pytest.raises(ValueError, match="BINANCE_ENV"):
+        service.approve(
+            "ticket-1",
+            actor="owner",
+            channel="telegram",
+            code=confirmation_code(SECRET, "ticket-1", NOW),
+        )
+
+    assert broker.place_calls == 0
+
+
 def test_confirmation_code_is_ticket_bound_and_five_minute_scoped():
     first = confirmation_code(SECRET, "ticket-1", NOW)
 
@@ -214,6 +249,24 @@ def test_confirmation_code_is_ticket_bound_and_five_minute_scoped():
     )
 
 
+def test_claimed_telegram_channel_without_trusted_proof_is_blocked(tmp_path):
+    service, _, broker = make_service(
+        tmp_path,
+        environment="mainnet",
+        live_enabled=True,
+    )
+
+    with pytest.raises(ValueError, match="trusted Telegram proof"):
+        service.approve(
+            "ticket-1",
+            actor="owner",
+            channel="telegram",
+            code=confirmation_code(SECRET, "ticket-1", NOW),
+        )
+
+    assert broker.place_calls == 0
+
+
 def test_valid_mainnet_telegram_approval_submits_once(tmp_path):
     service, store, broker = make_service(
         tmp_path,
@@ -221,12 +274,14 @@ def test_valid_mainnet_telegram_approval_submits_once(tmp_path):
         live_enabled=True,
     )
     code = confirmation_code(SECRET, "ticket-1", NOW)
+    proof = telegram_approval_proof(TELEGRAM_SECRET, "ticket-1", "owner", code)
 
     result = service.approve(
         "ticket-1",
         actor="owner",
         channel="telegram",
         code=code,
+        telegram_proof=proof,
     )
 
     assert result.status == "SUBMITTED"
@@ -239,6 +294,7 @@ def test_valid_mainnet_telegram_approval_submits_once(tmp_path):
             actor="owner",
             channel="telegram",
             code=code,
+            telegram_proof=proof,
         )
     assert broker.place_calls == 1
 
@@ -256,12 +312,15 @@ def test_mainnet_initial_cap_blocks_ticket_over_twenty_five_usdt(tmp_path):
         ticket=ticket,
     )
 
+    code = confirmation_code(SECRET, "ticket-1", NOW)
+    proof = telegram_approval_proof(TELEGRAM_SECRET, "ticket-1", "owner", code)
     with pytest.raises(ValueError, match="risk room|25 USDT"):
         service.approve(
             "ticket-1",
             actor="owner",
             channel="telegram",
-            code=confirmation_code(SECRET, "ticket-1", NOW),
+            code=code,
+            telegram_proof=proof,
         )
 
     assert broker.place_calls == 0
@@ -361,6 +420,32 @@ def test_changed_min_notional_blocks_submission(tmp_path):
     assert broker.place_calls == 0
 
 
+def test_unpriced_spot_balance_blocks_submission(tmp_path):
+    broker = FakeBroker("testnet")
+    broker.positions = (
+        {
+            "asset": "DUST",
+            "symbol": "DUSTUSDT",
+            "free": "1",
+            "locked": "0",
+            "total": "1",
+            "value_usdt": "0",
+            "unpriced": True,
+        },
+    )
+    service, _, broker = make_service(
+        tmp_path,
+        environment="testnet",
+        testnet_enabled=True,
+        broker=broker,
+    )
+
+    with pytest.raises(ValueError, match="unpriced"):
+        service.approve("ticket-1", actor="owner", channel="telegram")
+
+    assert broker.place_calls == 0
+
+
 def test_unknown_submission_is_reconciled_without_resubmission(tmp_path):
     broker = FakeBroker("testnet")
     broker.timeout = True
@@ -407,6 +492,138 @@ def test_unknown_submission_not_found_requires_manual_reconcile(tmp_path):
     assert result.status == "RECONCILE_REQUIRED"
     assert store.submission("ticket-1")["status"] == "RECONCILE_REQUIRED"
     assert broker.place_calls == 1
+
+
+def test_ambiguous_sell_reconciles_by_standalone_exit_client_id(tmp_path):
+    broker = FakeBroker("testnet")
+    broker.positions = (
+        {
+            "asset": "BTC",
+            "symbol": "BTCUSDT",
+            "free": "0",
+            "locked": "0.01000",
+            "total": "0.01000",
+            "value_usdt": "1000.00000",
+        },
+    )
+    broker.timeout = True
+    ticket = TradeTicket(
+        id="ticket-1",
+        environment="testnet",
+        symbol="BTCUSDT",
+        intent="CLOSE",
+        side="SELL",
+        quantity=Decimal("0.01000"),
+        limit_price=Decimal("100000.00"),
+        stop_price=Decimal("95000.00"),
+        target_price=Decimal("110000.00"),
+        notional_usdt=Decimal("1000.0000000"),
+        risk_snapshot={"protection_list_client_order_id": "cdt-existing"},
+        created_at=iso(NOW),
+        expires_at=iso(NOW + timedelta(minutes=30)),
+    )
+    service, _, broker = make_service(
+        tmp_path,
+        testnet_enabled=True,
+        broker=broker,
+        ticket=ticket,
+    )
+
+    service.approve("ticket-1", actor="owner", channel="telegram")
+
+    assert broker.reconcile_ids == ["cdt-ticket-1-e"]
+
+
+def test_reconciled_expired_sell_restores_protection(tmp_path):
+    broker = FakeBroker("testnet")
+    broker.positions = (
+        {
+            "asset": "BTC",
+            "symbol": "BTCUSDT",
+            "free": "0",
+            "locked": "0.01000",
+            "total": "0.01000",
+            "value_usdt": "1000.00000",
+        },
+    )
+    broker.timeout = True
+    broker.chain = {"status": "EXPIRED"}
+    ticket = TradeTicket(
+        id="ticket-1",
+        environment="testnet",
+        symbol="BTCUSDT",
+        intent="CLOSE",
+        side="SELL",
+        quantity=Decimal("0.01000"),
+        limit_price=Decimal("100000.00"),
+        stop_price=Decimal("95000.00"),
+        target_price=Decimal("110000.00"),
+        notional_usdt=Decimal("1000.0000000"),
+        risk_snapshot={"protection_list_client_order_id": "cdt-existing"},
+        created_at=iso(NOW),
+        expires_at=iso(NOW + timedelta(minutes=30)),
+    )
+    service, _, broker = make_service(
+        tmp_path,
+        testnet_enabled=True,
+        broker=broker,
+        ticket=ticket,
+    )
+
+    result = service.approve("ticket-1", actor="owner", channel="telegram")
+
+    assert result.status == "EXPIRED"
+    assert broker.protection_quantities == [Decimal("0.01000")]
+
+
+def test_restart_after_protection_cancel_restores_oco_before_any_exit_submit(
+    tmp_path,
+):
+    broker = FakeBroker("testnet")
+    broker.positions = (
+        {
+            "asset": "BTC",
+            "symbol": "BTCUSDT",
+            "free": "0.01000",
+            "locked": "0",
+            "total": "0.01000",
+            "value_usdt": "1000.00000",
+        },
+    )
+    broker.chain = None
+    ticket = TradeTicket(
+        id="ticket-1",
+        environment="testnet",
+        symbol="BTCUSDT",
+        intent="CLOSE",
+        side="SELL",
+        quantity=Decimal("0.01000"),
+        limit_price=Decimal("100000.00"),
+        stop_price=Decimal("95000.00"),
+        target_price=Decimal("110000.00"),
+        notional_usdt=Decimal("1000.0000000"),
+        risk_snapshot={"protection_list_client_order_id": "cdt-existing"},
+        created_at=iso(NOW),
+        expires_at=iso(NOW + timedelta(minutes=30)),
+    )
+    service, store, broker = make_service(
+        tmp_path,
+        testnet_enabled=True,
+        broker=broker,
+        ticket=ticket,
+    )
+    store.save_submission(
+        ticket.id,
+        "testnet",
+        broker.client_order_id(ticket.id, ticket.side),
+        {"status": "PROTECTION_CANCELED"},
+    )
+
+    result = service.reconcile(ticket.id)
+
+    assert result.status == "FAILED_SAFE"
+    assert broker.protection_quantities == [Decimal("0.01000")]
+    assert store.submission(ticket.id)["status"] == "FAILED_SAFE"
 
 
 def test_reject_is_audited_and_never_submits(tmp_path):
@@ -468,6 +685,49 @@ def test_reduce_replaces_protection_after_fok_fill(tmp_path):
     assert broker.cancel_calls == 1
     assert broker.exit_calls == 1
     assert broker.protection_quantities == [Decimal("0.00500")]
+
+
+def test_exit_uses_total_locked_balance_then_refreshes_after_protection_cancel(
+    tmp_path,
+):
+    broker = FakeBroker("testnet")
+    broker.positions = (
+        {
+            "asset": "BTC",
+            "symbol": "BTCUSDT",
+            "free": "0",
+            "locked": "0.01000",
+            "total": "0.01000",
+            "value_usdt": "1000.00000",
+        },
+    )
+    ticket = TradeTicket(
+        id="ticket-1",
+        environment="testnet",
+        symbol="BTCUSDT",
+        intent="CLOSE",
+        side="SELL",
+        quantity=Decimal("0.01000"),
+        limit_price=Decimal("100000.00"),
+        stop_price=Decimal("95000.00"),
+        target_price=Decimal("110000.00"),
+        notional_usdt=Decimal("1000.0000000"),
+        risk_snapshot={"protection_list_client_order_id": "cdt-existing-protection"},
+        created_at=iso(NOW),
+        expires_at=iso(NOW + timedelta(minutes=30)),
+    )
+    service, _, broker = make_service(
+        tmp_path,
+        testnet_enabled=True,
+        broker=broker,
+        ticket=ticket,
+    )
+
+    result = service.approve("ticket-1", actor="owner", channel="telegram")
+
+    assert result.status == "FILLED"
+    assert broker.cancel_calls == 1
+    assert broker.exit_calls == 1
 
 
 def test_mainnet_terminal_chain_counts_only_after_reconcile(tmp_path):

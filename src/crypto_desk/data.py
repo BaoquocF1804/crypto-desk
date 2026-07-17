@@ -233,8 +233,16 @@ class EvidenceBuilder:
             raise EvidenceError(f"Missing CoinGecko id for {symbol}")
 
         exchange = self.client.exchange_info(symbol)
-        daily = self.client.klines(symbol, "1d", 120)
-        four_hour = self.client.klines(symbol, "4h", 180)
+        daily = self._closed_klines(
+            self.client.klines(symbol, "1d", 121),
+            cutoff,
+            "daily",
+        )
+        four_hour = self._closed_klines(
+            self.client.klines(symbol, "4h", 181),
+            cutoff,
+            "4h",
+        )
         depth = self.client.depth(symbol)
         book = self.client.book_ticker(symbol)
         ticker = self.client.ticker_24h(symbol)
@@ -361,6 +369,23 @@ class EvidenceBuilder:
             funding_rate=funding_rate,
             open_interest=open_interest_value,
             news_count=len(recent_news),
+        )
+
+    @staticmethod
+    def _closed_klines(
+        fetched: Fetched,
+        cutoff: datetime,
+        label: str,
+    ) -> Fetched:
+        rows = [row for row in fetched.payload if _utc_from_ms(row[6]) <= cutoff]
+        if not rows:
+            raise EvidenceError(f"No closed {label} candles at cutoff")
+        return Fetched(
+            provider=fetched.provider,
+            source=fetched.source,
+            fetched_at=fetched.fetched_at,
+            as_of=_utc_from_ms(rows[-1][6]),
+            payload=rows,
         )
 
     @staticmethod
