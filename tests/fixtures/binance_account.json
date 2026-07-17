@@ -1,0 +1,13 @@
+{
+  "canTrade": true,
+  "canWithdraw": false,
+  "canDeposit": true,
+  "accountType": "SPOT",
+  "updateTime": 1784247300000,
+  "balances": [
+    {"asset": "USDT", "free": "100.00000000", "locked": "0.00000000"},
+    {"asset": "BTC", "free": "0.00100000", "locked": "0.00020000"},
+    {"asset": "BNB", "free": "0.10000000", "locked": "0.00000000"}
+  ],
+  "permissions": ["SPOT"]
+}

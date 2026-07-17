@@ -1,0 +1,14 @@
+{
+  "orderListId": 123,
+  "contingencyType": "OTO",
+  "listStatusType": "EXEC_STARTED",
+  "listOrderStatus": "EXECUTING",
+  "listClientOrderId": "cdt-fixture",
+  "transactionTime": 1784247300000,
+  "symbol": "BTCUSDT",
+  "orders": [
+    {"symbol": "BTCUSDT", "orderId": 1001, "clientOrderId": "cdt-fixture-w"},
+    {"symbol": "BTCUSDT", "orderId": 1002, "clientOrderId": "cdt-fixture-t"},
+    {"symbol": "BTCUSDT", "orderId": 1003, "clientOrderId": "cdt-fixture-s"}
+  ]
+}
