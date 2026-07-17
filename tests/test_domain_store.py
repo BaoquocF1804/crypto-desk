@@ -23,10 +23,10 @@ def make_ticket(environment: str = "testnet") -> TradeTicket:
     )
 
 
-def test_store_uses_schema_version_one(tmp_path: Path):
+def test_store_uses_schema_version_two(tmp_path: Path):
     store = Store(tmp_path / "crypto.db")
 
-    assert store.schema_version() == 1
+    assert store.schema_version() == 2
 
 
 def test_snapshot_round_trip_preserves_decimal_values(tmp_path: Path):
@@ -60,6 +60,7 @@ def test_ticket_round_trip_and_approval_are_auditable(tmp_path: Path):
     assert loaded.risk_snapshot["risk_budget"] == "50"
     assert approval["actor"] == "owner"
     assert approval["channel"] == "telegram"
+    assert approval["decision"] == "APPROVE"
 
 
 def test_research_run_round_trip_preserves_decision_decimals(tmp_path: Path):

@@ -278,6 +278,9 @@ class BinanceSpotBroker:
             "order chain",
         )
 
+    def client_order_id(self, ticket_id: str) -> str:
+        return self._client_ids(ticket_id)["list"]
+
     def _client_ids(self, ticket_id: str) -> dict[str, str]:
         environment_code = "t" if self.environment == "testnet" else "m"
         digest = hashlib.sha256(ticket_id.encode()).hexdigest()[:20]

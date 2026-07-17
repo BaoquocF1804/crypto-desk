@@ -63,6 +63,7 @@ class Store:
               ticket_id TEXT PRIMARY KEY,
               actor TEXT NOT NULL,
               channel TEXT NOT NULL,
+              decision TEXT NOT NULL DEFAULT 'APPROVE',
               approved_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS submissions (
@@ -97,6 +98,19 @@ class Store:
         )
         if self.db.execute("SELECT COUNT(*) FROM schema_meta").fetchone()[0] == 0:
             self.db.execute("INSERT INTO schema_meta(version) VALUES (1)")
+        version = int(self.db.execute("SELECT version FROM schema_meta").fetchone()[0])
+        if version < 2:
+            approval_columns = {
+                row["name"] for row in self.db.execute("PRAGMA table_info(approvals)").fetchall()
+            }
+            if "decision" not in approval_columns:
+                self.db.execute(
+                    """
+                    ALTER TABLE approvals
+                    ADD COLUMN decision TEXT NOT NULL DEFAULT 'APPROVE'
+                    """
+                )
+            self.db.execute("UPDATE schema_meta SET version=2")
         self.db.commit()
 
     def close(self) -> None:
@@ -207,20 +221,55 @@ class Store:
         return TradeTicket(**payload)
 
     def approve_ticket(self, ticket_id: str, *, actor: str, channel: str) -> None:
+        self.record_approval(
+            ticket_id,
+            actor=actor,
+            channel=channel,
+            status="APPROVED",
+        )
+
+    def record_approval(
+        self,
+        ticket_id: str,
+        *,
+        actor: str,
+        channel: str,
+        status: str,
+        decision: str | None = None,
+    ) -> None:
         if not self.db.execute("SELECT 1 FROM tickets WHERE id=?", (ticket_id,)).fetchone():
             raise ValueError(f"Unknown ticket: {ticket_id}")
         try:
             self.db.execute(
                 """
-                INSERT INTO approvals(ticket_id,actor,channel,approved_at)
-                VALUES (?,?,?,?)
+                INSERT INTO approvals(
+                  ticket_id,actor,channel,decision,approved_at
+                ) VALUES (?,?,?,?,?)
                 """,
-                (ticket_id, actor, channel, iso()),
+                (
+                    ticket_id,
+                    actor,
+                    channel,
+                    decision or ("REJECT" if status == "REJECTED" else "APPROVE"),
+                    iso(),
+                ),
             )
-            self.db.execute("UPDATE tickets SET status='APPROVED' WHERE id=?", (ticket_id,))
+            self.db.execute(
+                "UPDATE tickets SET status=? WHERE id=?",
+                (status, ticket_id),
+            )
             self.db.commit()
         except sqlite3.IntegrityError as exc:
-            raise ValueError(f"Ticket {ticket_id} is already approved") from exc
+            raise ValueError(f"Ticket {ticket_id} already has an approval decision") from exc
+
+    def set_ticket_status(self, ticket_id: str, status: str) -> None:
+        cursor = self.db.execute(
+            "UPDATE tickets SET status=? WHERE id=?",
+            (status, ticket_id),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError(f"Unknown ticket: {ticket_id}")
+        self.db.commit()
 
     def approval(self, ticket_id: str) -> dict[str, str]:
         row = self.db.execute("SELECT * FROM approvals WHERE ticket_id=?", (ticket_id,)).fetchone()
@@ -251,6 +300,36 @@ class Store:
                 f"Ticket {ticket_id} or client order {client_order_id} is already submitted"
             ) from exc
 
+    def submission(self, ticket_id: str) -> dict[str, Any] | None:
+        row = self.db.execute(
+            "SELECT * FROM submissions WHERE ticket_id=?",
+            (ticket_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "ticket_id": row["ticket_id"],
+            "environment": row["environment"],
+            "client_order_id": row["client_order_id"],
+            "status": row["status"],
+            "updated_at": row["updated_at"],
+            "payload": json.loads(row["payload"]),
+        }
+
+    def submission_by_client_order_id(
+        self,
+        environment: Environment,
+        client_order_id: str,
+    ) -> dict[str, Any] | None:
+        row = self.db.execute(
+            """
+            SELECT ticket_id FROM submissions
+            WHERE environment=? AND client_order_id=?
+            """,
+            (environment, client_order_id),
+        ).fetchone()
+        return self.submission(row["ticket_id"]) if row else None
+
     def record_order_event(self, ticket_id: str, status: str, payload: dict[str, Any]) -> None:
         if not self.db.execute(
             "SELECT 1 FROM submissions WHERE ticket_id=?", (ticket_id,)
@@ -270,6 +349,10 @@ class Store:
             """,
             (status, iso(), _json(payload), ticket_id),
         )
+        self.db.execute(
+            "UPDATE tickets SET status=? WHERE id=?",
+            (status, ticket_id),
+        )
         self.db.commit()
 
     def completed_mainnet_chains(self) -> int:
@@ -277,7 +360,9 @@ class Store:
         row = self.db.execute(
             f"""
             SELECT COUNT(*) FROM submissions
-            WHERE environment='mainnet' AND status IN ({placeholders})
+            WHERE environment='mainnet'
+              AND status IN ({placeholders})
+              AND COALESCE(json_extract(payload, '$._reconciled'), 1) = 1
             """,
             tuple(sorted(TERMINAL_CHAIN_STATES)),
         ).fetchone()
