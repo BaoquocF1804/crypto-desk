@@ -22,6 +22,16 @@ CUTOFF = datetime(2026, 7, 17, 0, 15, tzinfo=UTC)
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+def rss_xml(title: str, published: datetime) -> str:
+    return (
+        "<rss><channel><item>"
+        f"<title>{title}</title>"
+        f"<link>https://example.test/{title}</link>"
+        f"<pubDate>{published.strftime('%a, %d %b %Y %H:%M:%S +0000')}</pubDate>"
+        "</item></channel></rss>"
+    )
+
+
 def fetched(
     payload,
     *,
@@ -307,3 +317,44 @@ def test_public_client_uses_only_fixed_public_endpoints_and_offline_fixtures():
         "api.coingecko.com",
         "example.test",
     }
+
+
+def test_one_dead_feed_does_not_block_news_collection():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "dead.test":
+            raise httpx.ConnectError("connection refused")
+        return httpx.Response(200, text=rss_xml("alive", CUTOFF - timedelta(hours=1)))
+
+    client = PublicDataClient(
+        ("https://dead.test/feed.xml", "https://example.test/feed.xml"),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        now=lambda: CUTOFF,
+    )
+
+    result = client.news()
+
+    assert len(result.payload) == 1
+    assert result.payload[0]["title"] == "alive"
+    assert result.source == "https://example.test/feed.xml"
+
+
+def test_future_dated_item_is_dropped_and_does_not_poison_as_of():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "future.test":
+            return httpx.Response(200, text=rss_xml("future", CUTOFF + timedelta(days=2)))
+        return httpx.Response(200, text=rss_xml("current", CUTOFF - timedelta(hours=1)))
+
+    client = PublicDataClient(
+        ("https://future.test/feed.xml", "https://example.test/feed.xml"),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        now=lambda: CUTOFF,
+    )
+
+    result = client.news()
+
+    assert [item["title"] for item in result.payload] == ["current"]
+    assert result.as_of <= CUTOFF
+
+
+def test_default_client_follows_redirects():
+    assert PublicDataClient(()).client.follow_redirects is True

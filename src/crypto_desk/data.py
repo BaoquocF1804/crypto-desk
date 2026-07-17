@@ -72,7 +72,7 @@ class PublicDataClient:
     ):
         self.news_feeds = news_feeds
         self.coingecko_key = coingecko_key or os.getenv("COINGECKO_DEMO_API_KEY")
-        self.client = client or httpx.Client(timeout=10)
+        self.client = client or httpx.Client(timeout=10, follow_redirects=True)
         self.now = now
 
     def _json(
@@ -165,16 +165,28 @@ class PublicDataClient:
 
     def news(self) -> Fetched:
         fetched_at = _aware(self.now())
-        items: list[dict[str, str]] = []
+        collected: list[tuple[datetime, dict[str, str]]] = []
         sources: list[str] = []
         for url in self.news_feeds:
-            response = self.client.get(url)
-            response.raise_for_status()
+            try:
+                response = self.client.get(url)
+                response.raise_for_status()
+                parsed = _parse_feed(response.text)
+            except (httpx.HTTPError, ET.ParseError, ValueError, TypeError):
+                continue
             sources.append(str(response.url))
-            items.extend(_parse_feed(response.text))
-        published = [datetime.fromisoformat(item["published_at"]).astimezone(UTC) for item in items]
-        as_of = max(published, default=fetched_at)
-        return Fetched("rss", ",".join(sources), fetched_at, as_of, items)
+            for item in parsed:
+                published = datetime.fromisoformat(item["published_at"]).astimezone(UTC)
+                if published <= fetched_at:
+                    collected.append((published, item))
+        as_of = max((published for published, _ in collected), default=fetched_at)
+        return Fetched(
+            "rss",
+            ",".join(sources),
+            fetched_at,
+            as_of,
+            [item for _, item in collected],
+        )
 
 
 def _local_name(tag: str) -> str:
