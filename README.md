@@ -90,8 +90,9 @@ Mainnet cần đồng thời đủ ba cổng:
 
 1. `BINANCE_ENV=mainnet`;
 2. `LIVE_EXECUTION_ENABLED=1`;
-3. approval từ Telegram user trong allowlist kèm confirmation code còn hạn năm
-   phút và HMAC proof do trusted Telegram ingress tạo.
+3. approval từ Telegram user trong allowlist kèm confirmation code còn hạn
+   (hợp lệ trong bucket 5 phút hiện tại hoặc liền trước, tối đa 10 phút) và
+   HMAC proof do trusted Telegram ingress tạo.
 
 Confirmation code chỉ được tạo cục bộ:
 

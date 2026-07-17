@@ -27,14 +27,10 @@ class ExecutionResult:
     payload: dict[str, Any]
 
 
-def confirmation_code(
-    secret: str,
-    ticket_id: str,
-    now: datetime,
-) -> str:
-    if not secret:
-        raise ValueError("LIVE_CONFIRMATION_SECRET is required")
-    bucket = int(now.astimezone(UTC).timestamp()) // 300
+CODE_BUCKET_SECONDS = 300
+
+
+def _code_for_bucket(secret: str, ticket_id: str, bucket: int) -> str:
     digest = hmac.new(
         secret.encode(),
         f"{ticket_id}:{bucket}".encode(),
@@ -43,14 +39,27 @@ def confirmation_code(
     return f"{int.from_bytes(digest[:4], 'big') % 1_000_000:06d}"
 
 
+def confirmation_code(
+    secret: str,
+    ticket_id: str,
+    now: datetime,
+) -> str:
+    if not secret:
+        raise ValueError("LIVE_CONFIRMATION_SECRET is required")
+    bucket = int(now.astimezone(UTC).timestamp()) // CODE_BUCKET_SECONDS
+    return _code_for_bucket(secret, ticket_id, bucket)
+
+
 def verify_confirmation_code(
     secret: str,
     ticket_id: str,
     supplied: str,
     now: datetime,
 ) -> bool:
-    expected = confirmation_code(secret, ticket_id, now)
-    return hmac.compare_digest(expected, supplied)
+    bucket = int(now.astimezone(UTC).timestamp()) // CODE_BUCKET_SECONDS
+    current = hmac.compare_digest(_code_for_bucket(secret, ticket_id, bucket), supplied)
+    previous = hmac.compare_digest(_code_for_bucket(secret, ticket_id, bucket - 1), supplied)
+    return current | previous
 
 
 def telegram_approval_proof(

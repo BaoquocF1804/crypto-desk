@@ -245,8 +245,16 @@ def test_confirmation_code_is_ticket_bound_and_five_minute_scoped():
         SECRET,
         "ticket-1",
         first,
-        NOW + timedelta(minutes=5),
+        NOW + timedelta(minutes=10),
     )
+
+
+def test_confirmation_code_from_previous_bucket_is_accepted():
+    issued = NOW - timedelta(seconds=1)
+    code = confirmation_code(SECRET, "ticket-1", issued)
+
+    assert verify_confirmation_code(SECRET, "ticket-1", code, NOW + timedelta(seconds=1))
+    assert not verify_confirmation_code(SECRET, "ticket-1", code, NOW + timedelta(seconds=301))
 
 
 def test_claimed_telegram_channel_without_trusted_proof_is_blocked(tmp_path):
