@@ -358,3 +358,47 @@ def test_future_dated_item_is_dropped_and_does_not_poison_as_of():
 
 def test_default_client_follows_redirects():
     assert PublicDataClient(()).client.follow_redirects is True
+
+
+def test_news_is_cached_within_a_run():
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        return httpx.Response(200, text=rss_xml("cached", CUTOFF - timedelta(hours=1)))
+
+    current = {"now": CUTOFF}
+    client = PublicDataClient(
+        ("https://example.test/feed.xml",),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        now=lambda: current["now"],
+    )
+
+    first = client.news()
+    second = client.news()
+    assert calls["count"] == 1
+    assert second is first
+
+    current["now"] = CUTOFF + timedelta(seconds=301)
+    third = client.news()
+    assert calls["count"] == 2
+    assert third is not first
+
+
+def test_total_feed_failure_is_not_cached():
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        raise httpx.ConnectError("down")
+
+    client = PublicDataClient(
+        ("https://example.test/feed.xml",),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        now=lambda: CUTOFF,
+    )
+
+    assert client.news().payload == []
+    first = calls["count"]
+    assert client.news().payload == []
+    assert calls["count"] > first

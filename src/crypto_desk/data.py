@@ -17,6 +17,7 @@ from .domain import EvidenceItem, SymbolRules, iso, to_jsonable, utcnow
 SPOT_PUBLIC = "https://api.binance.com"
 FUTURES_PUBLIC = "https://fapi.binance.com"
 COINGECKO_PUBLIC = "https://api.coingecko.com/api/v3"
+NEWS_CACHE_SECONDS = 300
 
 
 class EvidenceError(ValueError):
@@ -74,6 +75,7 @@ class PublicDataClient:
         self.coingecko_key = coingecko_key or os.getenv("COINGECKO_DEMO_API_KEY")
         self.client = client or httpx.Client(timeout=10, follow_redirects=True)
         self.now = now
+        self._news_cache: tuple[datetime, Fetched] | None = None
 
     def _json(
         self,
@@ -165,6 +167,10 @@ class PublicDataClient:
 
     def news(self) -> Fetched:
         fetched_at = _aware(self.now())
+        if self._news_cache is not None:
+            cached_at, cached = self._news_cache
+            if (fetched_at - cached_at).total_seconds() < NEWS_CACHE_SECONDS:
+                return cached
         collected: list[tuple[datetime, dict[str, str]]] = []
         sources: list[str] = []
         for url in self.news_feeds:
@@ -180,13 +186,16 @@ class PublicDataClient:
                 if published <= fetched_at:
                     collected.append((published, item))
         as_of = max((published for published, _ in collected), default=fetched_at)
-        return Fetched(
+        result = Fetched(
             "rss",
             ",".join(sources),
             fetched_at,
             as_of,
             [item for _, item in collected],
         )
+        if sources:
+            self._news_cache = (fetched_at, result)
+        return result
 
 
 def _local_name(tag: str) -> str:
