@@ -197,23 +197,67 @@ def test_invalid_accumulate_price_order_retries_then_no_trade():
     assert "stop < entry < target" in result.decision.reason
 
 
-def test_numeric_claim_absent_from_evidence_is_rejected():
+def test_hallucinated_entry_far_from_mid_is_rejected():
     fake_llm = FakeLLM()
     original_generate = fake_llm.generate
 
-    def invented_number(**kwargs):
+    def far_entry(**kwargs):
         response = original_generate(**kwargs)
         if kwargs["stage"] == "manager" and "action" in response:
-            response["bull_case"] = "Dòng tiền Spot được cho là tăng 999%."
+            response["entry"] = "150000"
+            response["stop"] = "140000"
+            response["target"] = "160000"
         return response
 
-    fake_llm.generate = invented_number
+    fake_llm.generate = far_entry
 
     result = CryptoCommittee(fake_llm).run(valid_snapshot())
 
     assert fake_llm.count("manager") == 2
     assert result.decision.action == "NO_TRADE"
-    assert "numeric claim" in result.decision.reason
+    assert "deviates" in result.decision.reason
+
+
+def test_prose_percentages_no_longer_force_no_trade():
+    fake_llm = FakeLLM()
+    original_generate = fake_llm.generate
+
+    def prose(**kwargs):
+        response = original_generate(**kwargs)
+        if kwargs["stage"] == "manager" and "action" in response:
+            response["bull_case"] = "Khối lượng Spot tăng khoảng 35% so với tuần trước."
+        return response
+
+    fake_llm.generate = prose
+
+    result = CryptoCommittee(fake_llm).run(valid_snapshot())
+
+    assert result.decision.action == "ACCUMULATE"
+
+
+def test_reduce_with_position_but_missing_prices_is_rejected():
+    fake_llm = FakeLLM()
+    original_generate = fake_llm.generate
+
+    def reduce_without_prices(**kwargs):
+        response = original_generate(**kwargs)
+        if kwargs["stage"] == "manager" and "action" in response:
+            response["action"] = "REDUCE"
+            response["entry"] = None
+            response["stop"] = None
+            response["target"] = None
+        return response
+
+    fake_llm.generate = reduce_without_prices
+
+    result = CryptoCommittee(fake_llm).run(
+        valid_snapshot(),
+        position_quantity=Decimal("1"),
+    )
+
+    assert fake_llm.count("manager") == 2
+    assert result.decision.action == "NO_TRADE"
+    assert "entry" in result.decision.reason
 
 
 def test_stale_snapshot_skips_all_llm_calls():

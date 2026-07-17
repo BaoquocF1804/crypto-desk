@@ -416,8 +416,8 @@ class CryptoDeskService:
         portfolio_as_of = datetime.fromisoformat(portfolio.as_of).astimezone(UTC)
         if portfolio_as_of > now or now - portfolio_as_of > timedelta(minutes=5):
             return None
-        assert decision.entry is not None
-        assert decision.stop is not None
+        if decision.entry is None or decision.stop is None:
+            return None
         current_gross = sum(
             (Decimal(position.get("value_usdt", "0")) for position in portfolio.positions),
             Decimal("0"),

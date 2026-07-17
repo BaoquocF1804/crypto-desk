@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Annotated, Any, Literal, Protocol
@@ -15,7 +14,7 @@ from .domain import Action, ResearchDecision, to_jsonable
 QUICK_MODEL = "gpt-5.4-mini"
 DEEP_MODEL = "gpt-5.5"
 SPECIALISTS = ("technical", "liquidity", "news", "derivatives")
-NUMBER_PATTERN = re.compile(r"(?<![\w])[-+]?\d+(?:[.,]\d+)?(?![\w])")
+MAX_ENTRY_DEVIATION = Decimal("0.02")
 
 ROLE_PROMPTS = {
     "technical": (
@@ -166,7 +165,6 @@ class CryptoCommittee:
                 reports=reports,
             )
         payload = self._base_payload(snapshot, reflections, position_quantity)
-        numeric_evidence = self._numeric_evidence(snapshot)
         try:
             for role in SPECIALISTS:
                 reports[role] = self._call(
@@ -176,7 +174,7 @@ class CryptoCommittee:
                     system_prompt=ROLE_PROMPTS[role],
                     payload={**payload, "reports": self._reports_payload(reports)},
                     valid_evidence_ids=snapshot.evidence_ids,
-                    numeric_evidence=numeric_evidence,
+                    snapshot_mid=snapshot.binance_mid,
                 )
 
             for round_number in range(1, self.debate_rounds + 1):
@@ -189,7 +187,7 @@ class CryptoCommittee:
                         system_prompt=ROLE_PROMPTS[side],
                         payload={**payload, "reports": self._reports_payload(reports)},
                         valid_evidence_ids=snapshot.evidence_ids,
-                        numeric_evidence=numeric_evidence,
+                        snapshot_mid=snapshot.binance_mid,
                     )
 
             manager = self._call(
@@ -199,7 +197,7 @@ class CryptoCommittee:
                 system_prompt=ROLE_PROMPTS["manager"],
                 payload={**payload, "reports": self._reports_payload(reports)},
                 valid_evidence_ids=snapshot.evidence_ids,
-                numeric_evidence=numeric_evidence,
+                snapshot_mid=snapshot.binance_mid,
                 position_quantity=position_quantity,
             )
         except CommitteeOutputError as exc:
@@ -235,7 +233,7 @@ class CryptoCommittee:
         system_prompt: str,
         payload: dict[str, Any],
         valid_evidence_ids: tuple[str, ...],
-        numeric_evidence: frozenset[Decimal],
+        snapshot_mid: Decimal,
         position_quantity: Decimal = Decimal("0"),
     ) -> AnalystReport | ManagerDecision:
         last_error = "invalid structured output"
@@ -255,9 +253,8 @@ class CryptoCommittee:
                     parsed.evidence_ids,
                     valid_evidence_ids,
                 )
-                self._validate_numeric_claims(parsed, numeric_evidence)
                 if isinstance(parsed, ManagerDecision):
-                    self._validate_manager(parsed, position_quantity)
+                    self._validate_manager(parsed, position_quantity, snapshot_mid)
                 return parsed
             except (ValidationError, ValueError, TypeError) as exc:
                 last_error = str(exc)
@@ -276,49 +273,21 @@ class CryptoCommittee:
     def _validate_manager(
         decision: ManagerDecision,
         position_quantity: Decimal,
+        snapshot_mid: Decimal,
     ) -> None:
-        if decision.action == "ACCUMULATE":
-            if None in (decision.entry, decision.stop, decision.target):
-                raise ValueError("ACCUMULATE requires entry, stop and target")
-            assert decision.entry is not None
-            assert decision.stop is not None
-            assert decision.target is not None
-            if not decision.stop < decision.entry < decision.target:
-                raise ValueError("ACCUMULATE requires stop < entry < target")
         if decision.action in {"REDUCE", "EXIT"} and position_quantity <= 0:
             raise ValueError(f"{decision.action} requires an existing position")
-
-    @staticmethod
-    def _validate_numeric_claims(
-        parsed: AnalystReport | ManagerDecision,
-        numeric_evidence: frozenset[Decimal],
-    ) -> None:
-        if isinstance(parsed, AnalystReport):
-            texts = [*parsed.observations, *parsed.risks]
-        else:
-            texts = [
-                parsed.bull_case,
-                parsed.bear_case,
-                *parsed.catalysts,
-                parsed.invalidation,
-            ]
-        claims = {
-            Decimal(match.replace(",", "."))
-            for text in texts
-            for match in NUMBER_PATTERN.findall(text)
-        }
-        unknown = claims - numeric_evidence
-        if unknown:
-            raise ValueError("numeric claim is absent from evidence")
-
-    @staticmethod
-    def _numeric_evidence(
-        snapshot: EvidenceSnapshot,
-    ) -> frozenset[Decimal]:
-        encoded = json.dumps(to_jsonable(snapshot), ensure_ascii=False)
-        values = {Decimal(match.replace(",", ".")) for match in NUMBER_PATTERN.findall(encoded)}
-        values.update(Decimal(value) for value in ("1", "4", "20", "24", "60", "120", "180"))
-        return frozenset(values)
+        if decision.action not in {"ACCUMULATE", "REDUCE", "EXIT"}:
+            return
+        if None in (decision.entry, decision.stop, decision.target):
+            raise ValueError(f"{decision.action} requires entry, stop and target")
+        assert decision.entry is not None
+        assert decision.stop is not None
+        assert decision.target is not None
+        if not decision.stop < decision.entry < decision.target:
+            raise ValueError(f"{decision.action} requires stop < entry < target")
+        if abs(decision.entry - snapshot_mid) / snapshot_mid > MAX_ENTRY_DEVIATION:
+            raise ValueError("entry price deviates more than 2% from Binance mid")
 
     @staticmethod
     def _base_payload(
