@@ -1,6 +1,14 @@
-base_currency: USD
-database: data/desk.sqlite3
-artifacts: artifacts
+base_currency: USDT
+database: data/crypto_desk.sqlite3
+artifacts: artifacts/crypto
+
+symbols: [BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT]
+coingecko_ids:
+  BTCUSDT: bitcoin
+  ETHUSDT: ethereum
+  BNBUSDT: binancecoin
+  SOLUSDT: solana
+news_feeds: []
 
 models:
   quick: gpt-5.4-mini
@@ -8,27 +16,19 @@ models:
   debate_rounds: 2
 
 risk:
-  per_trade: 0.01
-  max_symbol: 0.15
-  max_sector: 0.30
-  max_gross: 1.00
+  per_trade: 0.005
+  max_symbol: 0.20
+  max_gross: 0.80
+  min_usdt_reserve: 0.20
   max_quote_deviation: 0.005
+  mainnet_initial_order_cap_usdt: "25"
   ticket_ttl_minutes: 30
 
-broker:
-  host: 127.0.0.1
-  port: 7497
-  client_id: 71
-  account: ""
+binance:
+  environment: testnet
+
+schedule:
+  daily_utc: "00:15"
+  health_minutes: 15
 
 telegram_allowlist: []
-
-markets:
-  XNYS:
-    calendar: XNYS
-    ibkr_exchanges: [NYSE, NASDAQ, ARCA]
-    watchlist: [SPY, NVDA, MSFT]
-  XTKS:
-    calendar: XTKS
-    ibkr_exchanges: [TSEJ, TSE]
-    watchlist: [7203.T]

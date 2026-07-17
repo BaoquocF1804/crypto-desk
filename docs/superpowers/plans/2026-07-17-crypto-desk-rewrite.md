@@ -167,8 +167,10 @@ dev = ["pytest==8.4.2", "ruff==0.15.5"]
 desk = "crypto_desk.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/crypto_desk"]
+packages = ["src/investment_desk", "src/crypto_desk"]
 ```
+
+Keep both packages in the build target through Task 9 so the baseline test suite remains runnable. Task 10 removes `src/investment_desk` and changes this list to `["src/crypto_desk"]`.
 
 Run: `uv lock`
 
