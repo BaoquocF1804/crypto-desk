@@ -294,6 +294,10 @@ def doctor_report(
             "trusted_ingress_present": bool(os.getenv("HERMES_TELEGRAM_INGRESS_SECRET")),
             "allowlist_count": len(settings.telegram_allowlist),
         },
+        "news": {
+            "feeds_configured": len(settings.news_feeds),
+            "analyze_possible": bool(settings.news_feeds),
+        },
         "schedule": to_jsonable(settings.schedule),
         "hermes": {
             "installed": _hermes_installed(),

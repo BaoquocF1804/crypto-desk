@@ -8,6 +8,12 @@ coingecko_ids:
   ETHUSDT: ethereum
   BNBUSDT: binancecoin
   SOLUSDT: solana
+# analyze/daily yêu cầu ít nhất một RSS feed có tin trong 48 giờ gần nhất;
+# để trống news_feeds thì mọi phiên phân tích sẽ trả về NO_TRADE.
+# Ví dụ (chú ý: không có dấu "/" cuối URL CoinDesk — bản có "/" trả HTTP 308):
+# news_feeds:
+#   - https://www.coindesk.com/arc/outboundfeeds/rss
+#   - https://cointelegraph.com/rss
 news_feeds: []
 
 models:

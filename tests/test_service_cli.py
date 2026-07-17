@@ -8,7 +8,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from crypto_desk.broker import SpotQuote
-from crypto_desk.cli import _hermes_installed, app
+from crypto_desk.cli import _hermes_installed, app, doctor_report
 from crypto_desk.config import Settings
 from crypto_desk.data import EvidenceError, EvidenceSnapshot
 from crypto_desk.domain import (
@@ -635,3 +635,12 @@ def test_doctor_finds_hermes_in_user_local_bin_when_path_is_minimal(
     monkeypatch.setattr("crypto_desk.cli.shutil.which", lambda command: None)
 
     assert _hermes_installed(home=tmp_path) is True
+
+
+def test_doctor_reports_news_feed_visibility(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+
+    report = doctor_report(settings, store, online=False)
+
+    assert report["news"] == {"feeds_configured": 0, "analyze_possible": False}

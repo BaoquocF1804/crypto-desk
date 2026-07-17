@@ -51,6 +51,9 @@ trong `telegram_allowlist`. Chỉ process Hermes gateway được inject
 shell tương tác hoặc nội dung tin nhắn. CLI dùng nó để ký approval metadata trong
 process và không in proof. Không commit `.env` hoặc `config.yaml`.
 
+Bắt buộc cấu hình ít nhất một RSS feed hoạt động: `news_feeds` rỗng hoặc toàn
+feed chết khiến mọi lệnh `analyze` trả về `NO_TRADE` theo thiết kế fail-closed.
+
 Kiểm tra cấu hình offline trước:
 
 ```bash
