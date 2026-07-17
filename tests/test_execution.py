@@ -861,3 +861,12 @@ def test_resume_requires_matching_approval_record(tmp_path):
 
     with pytest.raises(ValueError, match="approval"):
         service.approve("ticket-1", actor="owner", channel="local")
+
+
+def test_resume_is_blocked_when_approval_decision_is_not_approve(tmp_path):
+    service, store, _ = make_service(tmp_path, testnet_enabled=True)
+    store.record_approval("ticket-1", actor="owner", channel="local", status="REJECTED")
+    store.set_ticket_status("ticket-1", "APPROVED")
+
+    with pytest.raises(ValueError, match="not APPROVE"):
+        service.approve("ticket-1", actor="owner", channel="local")
