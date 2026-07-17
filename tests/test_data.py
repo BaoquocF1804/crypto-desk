@@ -402,3 +402,43 @@ def test_total_feed_failure_is_not_cached():
     first = calls["count"]
     assert client.news().payload == []
     assert calls["count"] > first
+
+
+def test_transient_transport_error_is_retried_once(monkeypatch):
+    monkeypatch.setattr("crypto_desk.data.time.sleep", lambda _: None)
+    attempts = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise httpx.ConnectError("transient")
+        payload = json.loads((FIXTURES / "binance_book_ticker.json").read_text(encoding="utf-8"))
+        return httpx.Response(200, json=payload)
+
+    client = PublicDataClient(
+        (),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        now=lambda: CUTOFF,
+    )
+
+    assert client.book_ticker("BTCUSDT").payload["bidPrice"] == "99990.00"
+    assert attempts["count"] == 2
+
+
+def test_server_error_is_retried_then_raised(monkeypatch):
+    monkeypatch.setattr("crypto_desk.data.time.sleep", lambda _: None)
+    attempts = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["count"] += 1
+        return httpx.Response(500, json={"error": "upstream"})
+
+    client = PublicDataClient(
+        (),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        now=lambda: CUTOFF,
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        client.book_ticker("BTCUSDT")
+    assert attempts["count"] == 2

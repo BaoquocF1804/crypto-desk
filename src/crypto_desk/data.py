@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -77,6 +78,28 @@ class PublicDataClient:
         self.now = now
         self._news_cache: tuple[datetime, Fetched] | None = None
 
+    def _get(
+        self,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
+        for attempt in (0, 1):
+            try:
+                response = self.client.get(url, params=params, headers=headers)
+            except httpx.TransportError:
+                if attempt:
+                    raise
+                time.sleep(0.5)
+                continue
+            if response.status_code >= 500 and not attempt:
+                time.sleep(0.5)
+                continue
+            response.raise_for_status()
+            return response
+        raise EvidenceError(f"unreachable retry state for {url}")
+
     def _json(
         self,
         base: str,
@@ -87,8 +110,7 @@ class PublicDataClient:
     ) -> tuple[str, Any, datetime]:
         url = f"{base}{path}"
         fetched_at = _aware(self.now())
-        response = self.client.get(url, params=params, headers=headers)
-        response.raise_for_status()
+        response = self._get(url, params=params, headers=headers)
         return str(response.url), response.json(), fetched_at
 
     def exchange_info(self, symbol: str) -> Fetched:
@@ -175,8 +197,7 @@ class PublicDataClient:
         sources: list[str] = []
         for url in self.news_feeds:
             try:
-                response = self.client.get(url)
-                response.raise_for_status()
+                response = self._get(url)
                 parsed = _parse_feed(response.text)
             except (httpx.HTTPError, ET.ParseError, ValueError, TypeError):
                 continue
