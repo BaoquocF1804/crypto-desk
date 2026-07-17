@@ -347,7 +347,7 @@ class ExecutionService:
             and self.store.completed_mainnet_chains() < MAINNET_GRADUATION_CHAINS
             and current_notional > HARD_MAINNET_CAP_USDT
         ):
-            raise ValueError("Mainnet ticket exceeds the active 25 USDT cap")
+            raise ValueError(f"Mainnet ticket exceeds the active {HARD_MAINNET_CAP_USDT} USDT cap")
         return account, rules
 
     def _submit_sell(

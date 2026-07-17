@@ -119,7 +119,7 @@ def _validate(settings: Settings) -> None:
     if settings.risk.mainnet_initial_order_cap_usdt < Decimal("5"):
         raise ValueError("Mainnet initial order cap must be at least 5 USDT")
     if not 0 < settings.risk.ticket_ttl_minutes <= MAX_TICKET_TTL_MINUTES:
-        raise ValueError("ticket_ttl_minutes must be between 1 and 30")
+        raise ValueError(f"ticket_ttl_minutes must be between 1 and {MAX_TICKET_TTL_MINUTES}")
     if settings.models.debate_rounds != 2:
         raise ValueError("V1 requires exactly two debate rounds")
     if settings.binance.environment not in {"testnet", "mainnet"}:
