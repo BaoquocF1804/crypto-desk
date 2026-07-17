@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Redacted Crypto News</title>
+    <item>
+      <title>Institutional crypto flows rise</title>
+      <link>https://example.test/story</link>
+      <pubDate>Thu, 16 Jul 2026 23:15:00 GMT</pubDate>
+      <description>This body is intentionally not retained by Crypto Desk.</description>
+    </item>
+  </channel>
+</rss>
