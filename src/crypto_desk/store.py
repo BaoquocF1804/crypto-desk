@@ -330,6 +330,39 @@ class Store:
         ).fetchone()
         return self.submission(row["ticket_id"]) if row else None
 
+    def list_tickets(self) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            """
+            SELECT id,environment,symbol,status,created_at,expires_at
+            FROM tickets ORDER BY created_at DESC
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_submissions(
+        self,
+        statuses: tuple[str, ...] | None = None,
+    ) -> list[dict[str, Any]]:
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            rows = self.db.execute(
+                f"""
+                SELECT ticket_id FROM submissions
+                WHERE status IN ({placeholders})
+                ORDER BY updated_at
+                """,
+                statuses,
+            ).fetchall()
+        else:
+            rows = self.db.execute(
+                "SELECT ticket_id FROM submissions ORDER BY updated_at DESC"
+            ).fetchall()
+        return [
+            submission
+            for row in rows
+            if (submission := self.submission(row["ticket_id"])) is not None
+        ]
+
     def record_order_event(self, ticket_id: str, status: str, payload: dict[str, Any]) -> None:
         if not self.db.execute(
             "SELECT 1 FROM submissions WHERE ticket_id=?", (ticket_id,)
@@ -398,3 +431,27 @@ class Store:
         )
         self.db.commit()
         return cursor.rowcount == 1
+
+    def list_reflections(
+        self,
+        symbol: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if symbol:
+            rows = self.db.execute(
+                """
+                SELECT * FROM reflections
+                WHERE symbol=? ORDER BY created_at DESC
+                """,
+                (symbol,),
+            ).fetchall()
+        else:
+            rows = self.db.execute("SELECT * FROM reflections ORDER BY created_at DESC").fetchall()
+        return [
+            {
+                "run_id": row["run_id"],
+                "symbol": row["symbol"],
+                "created_at": row["created_at"],
+                "payload": json.loads(row["payload"]),
+            }
+            for row in rows
+        ]
