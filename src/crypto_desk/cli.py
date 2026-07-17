@@ -17,7 +17,7 @@ from pydantic import BaseModel
 
 from .broker import BinanceSpotBroker
 from .committee import CryptoCommittee, OpenAIStructuredClient
-from .config import Settings, load_settings
+from .config import MAINNET_GRADUATION_CHAINS, Settings, load_settings
 from .data import EvidenceBuilder, PublicDataClient
 from .domain import to_jsonable
 from .execution import ExecutionService, confirmation_code, telegram_approval_proof
@@ -287,7 +287,7 @@ def doctor_report(
             "live_execution_enabled": (os.getenv("LIVE_EXECUTION_ENABLED") == "1"),
             "confirmation_secret_present": bool(os.getenv("LIVE_CONFIRMATION_SECRET")),
             "completed_mainnet_chains": (store.completed_mainnet_chains()),
-            "initial_cap_active": store.completed_mainnet_chains() < 20,
+            "initial_cap_active": store.completed_mainnet_chains() < MAINNET_GRADUATION_CHAINS,
         },
         "telegram": {
             "token_present": bool(os.getenv("TELEGRAM_BOT_TOKEN")),

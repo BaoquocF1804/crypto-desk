@@ -13,6 +13,9 @@ from .domain import Environment
 TESTNET_URL = "https://testnet.binance.vision"
 MAINNET_URL = "https://api.binance.com"
 V1_SYMBOLS = frozenset({"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"})
+MAINNET_GRADUATION_CHAINS = 20
+HARD_MAINNET_CAP_USDT = Decimal("25")
+MAX_TICKET_TTL_MINUTES = 30
 DEFAULT_COINGECKO_IDS = {
     "BTCUSDT": "bitcoin",
     "ETHUSDT": "ethereum",
@@ -115,8 +118,8 @@ def _validate(settings: Settings) -> None:
             raise ValueError(f"risk.{name} must be between 0 and 1")
     if settings.risk.mainnet_initial_order_cap_usdt < Decimal("5"):
         raise ValueError("Mainnet initial order cap must be at least 5 USDT")
-    if settings.risk.ticket_ttl_minutes <= 0:
-        raise ValueError("ticket_ttl_minutes must be positive")
+    if not 0 < settings.risk.ticket_ttl_minutes <= MAX_TICKET_TTL_MINUTES:
+        raise ValueError("ticket_ttl_minutes must be between 1 and 30")
     if settings.models.debate_rounds != 2:
         raise ValueError("V1 requires exactly two debate rounds")
     if settings.binance.environment not in {"testnet", "mainnet"}:

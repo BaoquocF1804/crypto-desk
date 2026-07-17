@@ -64,6 +64,20 @@ risk:
         load_settings(config)
 
 
+def test_config_rejects_ticket_ttl_above_30_minutes(tmp_path: Path):
+    config = write_config(
+        tmp_path / "config.yaml",
+        """
+symbols: [BTCUSDT]
+risk:
+  ticket_ttl_minutes: 45
+""",
+    )
+
+    with pytest.raises(ValueError, match="ticket_ttl_minutes"):
+        load_settings(config)
+
+
 def test_decimal_serializes_as_string_without_losing_scale():
     assert to_jsonable({"qty": Decimal("0.00123000")}) == {"qty": "0.00123000"}
 

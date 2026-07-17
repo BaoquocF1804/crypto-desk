@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
 from typing import Literal
 
-from .config import RiskSettings
+from .config import HARD_MAINNET_CAP_USDT, MAINNET_GRADUATION_CHAINS, RiskSettings
 from .domain import (
     Environment,
     ResearchDecision,
@@ -12,8 +12,6 @@ from .domain import (
     TradeTicket,
     to_jsonable,
 )
-
-INITIAL_MAINNET_CAP_USDT = Decimal("25")
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,10 +82,10 @@ def size_buy(
         "max_gross": risk.max_gross * nav_usdt - current_gross_value,
         "usdt_reserve": free_usdt - risk.min_usdt_reserve * nav_usdt,
     }
-    if environment == "mainnet" and completed_mainnet_chains < 20:
+    if environment == "mainnet" and completed_mainnet_chains < MAINNET_GRADUATION_CHAINS:
         rooms["mainnet_cap"] = min(
             mainnet_order_cap_usdt,
-            INITIAL_MAINNET_CAP_USDT,
+            HARD_MAINNET_CAP_USDT,
         )
 
     limiting_rule = min(rooms, key=rooms.__getitem__)
@@ -114,8 +112,8 @@ def size_buy(
     )
     if (
         environment == "mainnet"
-        and completed_mainnet_chains < 20
-        and notional > min(mainnet_order_cap_usdt, INITIAL_MAINNET_CAP_USDT)
+        and completed_mainnet_chains < MAINNET_GRADUATION_CHAINS
+        and notional > min(mainnet_order_cap_usdt, HARD_MAINNET_CAP_USDT)
     ):
         raise ValueError("Order exceeds active Mainnet cap")
 

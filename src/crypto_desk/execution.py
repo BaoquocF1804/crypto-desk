@@ -9,7 +9,12 @@ from decimal import Decimal
 from typing import Any, Callable
 
 from .broker import BinanceSpotBroker, BrokerError
-from .config import Settings
+from .config import (
+    HARD_MAINNET_CAP_USDT,
+    MAINNET_GRADUATION_CHAINS,
+    MAX_TICKET_TTL_MINUTES,
+    Settings,
+)
 from .domain import PortfolioSnapshot, SymbolRules, TradeTicket, utcnow
 from .risk import round_down, size_buy, size_sell, validate_prices
 from .store import Store
@@ -247,7 +252,7 @@ class ExecutionService:
         expires = datetime.fromisoformat(ticket.expires_at).astimezone(UTC)
         if created > now:
             raise ValueError("Ticket creation time is in the future")
-        if now >= expires or now >= created + timedelta(minutes=30):
+        if now >= expires or now >= created + timedelta(minutes=MAX_TICKET_TTL_MINUTES):
             raise ValueError(f"Ticket {ticket_id} is expired")
         return ticket
 
@@ -339,8 +344,8 @@ class ExecutionService:
         current_notional = ticket.quantity * quote.mid
         if (
             ticket.environment == "mainnet"
-            and self.store.completed_mainnet_chains() < 20
-            and current_notional > Decimal("25")
+            and self.store.completed_mainnet_chains() < MAINNET_GRADUATION_CHAINS
+            and current_notional > HARD_MAINNET_CAP_USDT
         ):
             raise ValueError("Mainnet ticket exceeds the active 25 USDT cap")
         return account, rules
