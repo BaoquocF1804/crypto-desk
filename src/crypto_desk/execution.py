@@ -124,7 +124,7 @@ class ExecutionService:
         code: str | None = None,
         telegram_proof: str | None = None,
     ) -> ExecutionResult:
-        ticket = self._pending_ticket(ticket_id)
+        ticket, resuming = self._approvable_ticket(ticket_id)
         self._validate_actor(actor, channel, ticket)
         selected_environment = self.settings.binance.environment
         if ticket.environment != selected_environment:
@@ -188,12 +188,13 @@ class ExecutionService:
             raise ValueError(f"Client order {client_order_id} is already submitted")
 
         account, rules = self._pre_submit(ticket)
-        self.store.record_approval(
-            ticket.id,
-            actor=actor,
-            channel=channel,
-            status="APPROVED",
-        )
+        if not resuming:
+            self.store.record_approval(
+                ticket.id,
+                actor=actor,
+                channel=channel,
+                status="APPROVED",
+            )
         self.store.save_submission(
             ticket.id,
             ticket.environment,
@@ -252,10 +253,13 @@ class ExecutionService:
             submission["client_order_id"],
         )
 
-    def _pending_ticket(self, ticket_id: str) -> TradeTicket:
+    def _approvable_ticket(self, ticket_id: str) -> tuple[TradeTicket, bool]:
         ticket = self.store.ticket(ticket_id)
-        if ticket.status != "PENDING":
+        resuming = ticket.status == "APPROVED" and self.store.submission(ticket_id) is None
+        if ticket.status != "PENDING" and not resuming:
             raise ValueError(f"Ticket {ticket_id} is not PENDING")
+        if resuming and self.store.approval(ticket_id)["decision"] != "APPROVE":
+            raise ValueError(f"Ticket {ticket_id} approval is not APPROVE")
         now = self._now()
         created = datetime.fromisoformat(ticket.created_at).astimezone(UTC)
         expires = datetime.fromisoformat(ticket.expires_at).astimezone(UTC)
@@ -263,6 +267,12 @@ class ExecutionService:
             raise ValueError("Ticket creation time is in the future")
         if now >= expires or now >= created + timedelta(minutes=MAX_TICKET_TTL_MINUTES):
             raise ValueError(f"Ticket {ticket_id} is expired")
+        return ticket, resuming
+
+    def _pending_ticket(self, ticket_id: str) -> TradeTicket:
+        ticket, resuming = self._approvable_ticket(ticket_id)
+        if resuming:
+            raise ValueError(f"Ticket {ticket_id} is not PENDING")
         return ticket
 
     def _validate_actor(

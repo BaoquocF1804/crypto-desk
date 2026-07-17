@@ -798,3 +798,66 @@ def test_mainnet_terminal_chain_counts_only_after_reconcile(tmp_path):
     )
 
     assert store.completed_mainnet_chains() == 1
+
+
+def test_ticket_stuck_in_approved_without_submission_can_resume(tmp_path):
+    service, store, broker = make_service(tmp_path, testnet_enabled=True)
+    store.record_approval("ticket-1", actor="owner", channel="local", status="APPROVED")
+
+    result = service.approve("ticket-1", actor="owner", channel="local")
+
+    assert result.status == "SUBMITTED"
+    assert broker.place_calls == 1
+    assert store.submission("ticket-1") is not None
+    assert store.approval("ticket-1")["decision"] == "APPROVE"
+
+
+def test_resume_is_blocked_once_submission_exists(tmp_path):
+    service, store, _ = make_service(tmp_path, testnet_enabled=True)
+    service.approve("ticket-1", actor="owner", channel="local")
+
+    with pytest.raises(ValueError, match="not PENDING|already submitted"):
+        service.approve("ticket-1", actor="owner", channel="local")
+
+
+def test_resume_is_blocked_when_ticket_expired(tmp_path):
+    service, store, _ = make_service(
+        tmp_path,
+        testnet_enabled=True,
+        ticket=make_ticket(created_at=NOW - timedelta(minutes=31)),
+    )
+    store.record_approval("ticket-1", actor="owner", channel="local", status="APPROVED")
+
+    with pytest.raises(ValueError, match="expired"):
+        service.approve("ticket-1", actor="owner", channel="local")
+
+
+def test_resume_reruns_price_deviation_gate(tmp_path):
+    broker = FakeBroker("testnet")
+    broker.mid = Decimal("101000")
+    service, store, _ = make_service(tmp_path, testnet_enabled=True, broker=broker)
+    store.record_approval("ticket-1", actor="owner", channel="local", status="APPROVED")
+
+    with pytest.raises(ValueError, match="deviation"):
+        service.approve("ticket-1", actor="owner", channel="local")
+
+
+def test_mainnet_resume_still_requires_fresh_code_and_proof(tmp_path):
+    service, store, _ = make_service(
+        tmp_path,
+        environment="mainnet",
+        ticket_environment="mainnet",
+        live_enabled=True,
+    )
+    store.record_approval("ticket-1", actor="owner", channel="telegram", status="APPROVED")
+
+    with pytest.raises(ValueError, match="confirmation"):
+        service.approve("ticket-1", actor="owner", channel="telegram", code="000000")
+
+
+def test_resume_requires_matching_approval_record(tmp_path):
+    service, store, _ = make_service(tmp_path, testnet_enabled=True)
+    store.set_ticket_status("ticket-1", "APPROVED")
+
+    with pytest.raises(ValueError, match="approval"):
+        service.approve("ticket-1", actor="owner", channel="local")
