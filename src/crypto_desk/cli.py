@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import shutil
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -266,14 +267,16 @@ def reflections(
 @app.command("publish-dashboard")
 def publish_dashboard_command(ctx: typer.Context) -> None:
     settings = _load(ctx)
-    store = Store(settings.database)
+    store = None
     try:
+        store = Store(settings.database)
         snapshot = build_dashboard_snapshot(settings, store)
         publish_dashboard_from_env(snapshot, strict=True)
-    except DashboardPublishError as exc:
+    except (DashboardPublishError, OSError, sqlite3.Error) as exc:
         _fail(str(exc))
     finally:
-        store.close()
+        if store is not None:
+            store.close()
     _emit(ctx, {"status": "PUBLISHED", "generated_at": snapshot.generated_at})
 
 
@@ -488,14 +491,16 @@ def _load(ctx: typer.Context) -> Settings:
 def _publish_dashboard_if_configured(settings: Settings) -> None:
     if not os.getenv(DASHBOARD_INGEST_URL_ENV):
         return
-    store = Store(settings.database)
+    store = None
     try:
+        store = Store(settings.database)
         snapshot = build_dashboard_snapshot(settings, store)
         publish_dashboard_from_env(snapshot, strict=False)
     except Exception as exc:
         typer.echo(f"Warning: dashboard publish failed ({type(exc).__name__})", err=True)
     finally:
-        store.close()
+        if store is not None:
+            store.close()
 
 
 def _emit(ctx: typer.Context, payload: Any) -> None:

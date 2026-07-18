@@ -858,3 +858,28 @@ def test_dashboard_hook_does_not_fire_after_readonly_doctor(tmp_path: Path, monk
 
     assert result.exit_code == 0
     assert len(calls) == 0
+
+
+def test_dashboard_hook_swallows_store_open_failure(tmp_path: Path, monkeypatch):
+    """A Store-open failure inside the best-effort hook must not crash a
+    command that already succeeded. Exercises the real hook body (not the
+    spy) so the fix covering the Store(...) construction itself is proven."""
+    config = _write_config(tmp_path)
+    monkeypatch.setenv("CRYPTO_DESK_DASHBOARD_INGEST_URL", DASHBOARD_URL)
+
+    class FakeService:
+        def sync(self):
+            return {"nav_usdt": "1"}
+
+    monkeypatch.setattr("crypto_desk.cli._service", lambda settings, **kwargs: FakeService())
+
+    def _raise_on_open(path):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("crypto_desk.cli.Store", _raise_on_open)
+
+    result = CliRunner().invoke(app, ["--config", str(config), "--json", "sync"])
+
+    assert result.exit_code == 0
+    assert "nav_usdt" in result.output
+    assert "Warning: dashboard publish failed (OSError)" in result.output
