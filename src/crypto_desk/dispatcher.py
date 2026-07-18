@@ -13,13 +13,17 @@ from pydantic import BaseModel
 
 from .commands import (
     AnalyzeArgs,
+    ExecuteArgs,
+    PreviewArgs,
     ReflectionsArgs,
     SafeAnalyzeResult,
     SafeDailyResult,
     SafeDoctorResult,
+    SafeExecuteResult,
     SafeHealthResult,
     SafeOrderRow,
     SafeOrdersResult,
+    SafePreviewResult,
     SafeReflectionRow,
     SafeReflectionsResult,
     SafeScreenItem,
@@ -28,6 +32,7 @@ from .commands import (
     SafeTicketRow,
     SafeTicketsResult,
     parse_args,
+    ticket_fingerprint,
 )
 from .config import Settings
 from .domain import utcnow
@@ -334,6 +339,98 @@ class CommandDispatcher:
                 )
             )
         return SafeReflectionsResult(reflections=reflections)
+
+    def _require_testnet(
+        self,
+        ticket_environment: str | None = None,
+    ) -> None:
+        if self.settings.binance.environment != "testnet":
+            raise DispatchError("ENVIRONMENT_FORBIDDEN")
+        if os.getenv("BINANCE_ENV") != "testnet":
+            raise DispatchError("ENVIRONMENT_FORBIDDEN")
+        if (
+            ticket_environment is not None
+            and ticket_environment != "testnet"
+        ):
+            raise DispatchError("ENVIRONMENT_FORBIDDEN")
+
+    @staticmethod
+    def _load_ticket(store: Store, ticket_id: str) -> Any:
+        try:
+            return store.ticket(ticket_id)
+        except ValueError:
+            raise DispatchError("TICKET_NOT_FOUND") from None
+
+    def _dispatch_preview(
+        self,
+        args: PreviewArgs,
+        operator_email: str,
+    ) -> SafePreviewResult:
+        del operator_email
+        self._require_testnet()
+        store = self._store()
+        ticket = self._load_ticket(store, args.ticket_id)
+        self._require_testnet(ticket.environment)
+        submission = store.submission(ticket.id)
+        return SafePreviewResult(
+            action=args.action,
+            ticket_id=ticket.id,
+            environment=ticket.environment,
+            execution_mode=execution_mode(),
+            status=ticket.status,
+            symbol=ticket.symbol,
+            side=ticket.side,
+            intent=ticket.intent,
+            quantity=str(ticket.quantity),
+            notional_usdt=str(ticket.notional_usdt),
+            entry=str(ticket.limit_price),
+            stop=str(ticket.stop_price),
+            target=str(ticket.target_price),
+            created_at=ticket.created_at,
+            expires_at=ticket.expires_at,
+            submission_status=(
+                None if submission is None else submission["status"]
+            ),
+            fingerprint=ticket_fingerprint(ticket),
+        )
+
+    def _dispatch_execute(
+        self,
+        args: ExecuteArgs,
+        operator_email: str,
+    ) -> SafeExecuteResult:
+        self._require_testnet()
+        store = self._store()
+        ticket = self._load_ticket(store, args.ticket_id)
+        self._require_testnet(ticket.environment)
+        if ticket_fingerprint(ticket) != args.fingerprint:
+            raise DispatchError("TICKET_CHANGED")
+        execution = self._execution()
+        try:
+            if args.action == "approve":
+                result = execution.approve(
+                    ticket.id,
+                    actor=operator_email,
+                    channel="local",
+                )
+            elif args.action == "reject":
+                result = execution.reject(
+                    ticket.id,
+                    actor=operator_email,
+                    channel="local",
+                )
+            else:
+                result = execution.reconcile(ticket.id)
+        except ValueError as exc:
+            raise DispatchError(
+                "VALIDATION_FAILED",
+                str(exc),
+            ) from None
+        return SafeExecuteResult(
+            action=args.action,
+            ticket_id=ticket.id,
+            status=result.status,
+        )
 
 
 def _optional_str(value: Any) -> str | None:
