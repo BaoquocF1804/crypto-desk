@@ -544,9 +544,7 @@ class Store:
                 (command_id, command_hash, kind, now, now),
             )
         except sqlite3.IntegrityError:
-            raise ValueError(
-                f"Command {command_id} is already journaled"
-            ) from None
+            raise ValueError(f"Command {command_id} is already journaled") from None
         self.db.commit()
 
     def journal_entry(
@@ -581,21 +579,16 @@ class Store:
             ),
         )
         if cursor.rowcount != 1:
-            raise ValueError(
-                f"Command {command_id} has no journal entry"
-            )
+            raise ValueError(f"Command {command_id} has no journal entry")
         self.db.commit()
 
     def journal_mark_reported(self, command_id: str) -> None:
         cursor = self.db.execute(
-            "UPDATE command_journal SET reported = 1,"
-            " updated_at = ? WHERE command_id = ?",
+            "UPDATE command_journal SET reported = 1, updated_at = ? WHERE command_id = ?",
             (iso(), command_id),
         )
         if cursor.rowcount != 1:
-            raise ValueError(
-                f"Command {command_id} has no journal entry"
-            )
+            raise ValueError(f"Command {command_id} has no journal entry")
         self.db.commit()
 
     def journal_running(self) -> list[dict[str, Any]]:
@@ -623,11 +616,7 @@ class Store:
             "kind": row["kind"],
             "state": row["state"],
             "reported": bool(row["reported"]),
-            "result": (
-                json.loads(row["result"])
-                if row["result"]
-                else None
-            ),
+            "result": (json.loads(row["result"]) if row["result"] else None),
             "error_code": row["error_code"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],

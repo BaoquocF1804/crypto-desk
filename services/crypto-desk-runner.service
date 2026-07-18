@@ -1,0 +1,12 @@
+[Unit]
+Description=Crypto Desk Command Runner
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/crypto-desk-rewrite/scripts/desk runner
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

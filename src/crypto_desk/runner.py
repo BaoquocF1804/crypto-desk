@@ -57,21 +57,11 @@ class CommandRunner:
         log: Callable[[str], None] = lambda message: None,
     ):
         self.settings = settings
-        self.store = (
-            store
-            if store is not None
-            else Store(settings.database)
-        )
-        self.dispatcher = (
-            dispatcher
-            if dispatcher is not None
-            else CommandDispatcher(settings)
-        )
+        self.store = store if store is not None else Store(settings.database)
+        self.dispatcher = dispatcher if dispatcher is not None else CommandDispatcher(settings)
         headers = {
             "Authorization": f"Bearer {runner_token}",
-            "OAI-Sites-Authorization": (
-                f"Bearer {sites_bypass_token}"
-            ),
+            "OAI-Sites-Authorization": (f"Bearer {sites_bypass_token}"),
         }
         self.client = client or httpx.Client(
             base_url=base_url,
@@ -111,10 +101,7 @@ class CommandRunner:
     ) -> httpx.Response:
         response = self.client.post(path, json=payload)
         if response.status_code >= 500:
-            raise RunnerProtocolError(
-                "runner API failed "
-                f"(status {response.status_code})"
-            )
+            raise RunnerProtocolError(f"runner API failed (status {response.status_code})")
         return response
 
     def register(self) -> None:
@@ -126,14 +113,9 @@ class CommandRunner:
             },
         )
         if response.status_code == 409:
-            raise RunnerProtocolError(
-                "SESSION_CONFLICT: another runner session is active"
-            )
+            raise RunnerProtocolError("SESSION_CONFLICT: another runner session is active")
         if response.status_code != 200:
-            raise RunnerProtocolError(
-                "session register rejected "
-                f"(status {response.status_code})"
-            )
+            raise RunnerProtocolError(f"session register rejected (status {response.status_code})")
 
     def heartbeat(self) -> None:
         response = self._post(
@@ -144,14 +126,9 @@ class CommandRunner:
             },
         )
         if response.status_code == 409:
-            raise RunnerProtocolError(
-                "SESSION_MISMATCH: singleton session changed"
-            )
+            raise RunnerProtocolError("SESSION_MISMATCH: singleton session changed")
         if response.status_code != 200:
-            raise RunnerProtocolError(
-                "heartbeat rejected "
-                f"(status {response.status_code})"
-            )
+            raise RunnerProtocolError(f"heartbeat rejected (status {response.status_code})")
 
     def claim(self) -> dict[str, Any] | None:
         response = self._post(
@@ -159,9 +136,7 @@ class CommandRunner:
             {"session_id": self.session_id},
         )
         if response.status_code != 200:
-            raise RunnerProtocolError(
-                f"claim rejected (status {response.status_code})"
-            )
+            raise RunnerProtocolError(f"claim rejected (status {response.status_code})")
         return response.json().get("command")
 
     def renew_lease(self, command_id: str) -> bool:
@@ -193,10 +168,7 @@ class CommandRunner:
             },
         )
         if response.status_code != 200:
-            raise RunnerProtocolError(
-                "result report rejected "
-                f"(status {response.status_code})"
-            )
+            raise RunnerProtocolError(f"result report rejected (status {response.status_code})")
         return True
 
     def recover(self) -> None:
@@ -225,18 +197,12 @@ class CommandRunner:
                 error_code=entry["error_code"],
             )
         except (httpx.HTTPError, RunnerProtocolError) as exc:
-            self._log(
-                "report failed "
-                f"({type(exc).__name__}); will retry"
-            )
+            self._log(f"report failed ({type(exc).__name__}); will retry")
             return
         self.store.journal_mark_reported(entry["command_id"])
 
     def process_one(self) -> bool:
-        recovering = bool(
-            self.store.journal_running()
-            or self.store.journal_unreported()
-        )
+        recovering = bool(self.store.journal_running() or self.store.journal_unreported())
         self.recover()
         if recovering or self.store.journal_unreported():
             return False
@@ -261,10 +227,7 @@ class CommandRunner:
                     httpx.HTTPError,
                     RunnerProtocolError,
                 ) as exc:
-                    self._log(
-                        "integrity report failed "
-                        f"({type(exc).__name__})"
-                    )
+                    self._log(f"integrity report failed ({type(exc).__name__})")
                 return True
             if entry["state"] != "RUNNING":
                 self._report_entry(entry)
@@ -277,12 +240,8 @@ class CommandRunner:
             model = self.dispatcher.dispatch(
                 kind,
                 args,
-                operator_email=str(
-                    claimed.get("operator_email", "")
-                ),
-                environment=str(
-                    claimed.get("environment", "testnet")
-                ),
+                operator_email=str(claimed.get("operator_email", "")),
+                environment=str(claimed.get("environment", "testnet")),
             )
             self.store.journal_finish(
                 command_id,
@@ -314,26 +273,17 @@ class CommandRunner:
                     state="FAILED",
                     error_code="DISPATCH_FAILED",
                 )
-            self._log(
-                f"dispatch {kind} failed ({type(exc).__name__})"
-            )
+            self._log(f"dispatch {kind} failed ({type(exc).__name__})")
         finally:
             with self._active_lock:
                 self._active_command_id = None
 
         entry = self.store.journal_entry(command_id)
         if entry is None:
-            raise RunnerProtocolError(
-                "journal entry disappeared after dispatch"
-            )
+            raise RunnerProtocolError("journal entry disappeared after dispatch")
         self._report_entry(entry)
-        if (
-            entry["state"] == "SUCCEEDED"
-            and kind in STATE_CHANGING_KINDS
-        ):
-            warning = publish_dashboard_if_configured(
-                self.settings
-            )
+        if entry["state"] == "SUCCEEDED" and kind in STATE_CHANGING_KINDS:
+            warning = publish_dashboard_if_configured(self.settings)
             if warning:
                 self._log(warning)
         return True
@@ -358,9 +308,7 @@ class CommandRunner:
                     httpx.HTTPError,
                     RunnerProtocolError,
                 ) as exc:
-                    self._log(
-                        f"poll failed ({type(exc).__name__})"
-                    )
+                    self._log(f"poll failed ({type(exc).__name__})")
                 if not worked:
                     self._sleep(IDLE_POLL_SECONDS)
         finally:
@@ -375,14 +323,8 @@ class CommandRunner:
                 self.heartbeat()
                 with self._active_lock:
                     active = self._active_command_id
-                elapsed = (
-                    time.monotonic() - self._last_lease_renew
-                )
-                if (
-                    active
-                    and elapsed >= LEASE_RENEW_SECONDS
-                    and self.renew_lease(active)
-                ):
+                elapsed = time.monotonic() - self._last_lease_renew
+                if active and elapsed >= LEASE_RENEW_SECONDS and self.renew_lease(active):
                     self._last_lease_renew = time.monotonic()
             except (httpx.HTTPError, RunnerProtocolError):
                 continue

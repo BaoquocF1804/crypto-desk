@@ -4,6 +4,7 @@ import importlib.metadata
 import json
 import os
 import platform
+import signal
 import shutil
 import sqlite3
 from datetime import UTC, datetime
@@ -20,14 +21,22 @@ from .broker import BinanceSpotBroker
 from .committee import CryptoCommittee, OpenAIStructuredClient
 from .config import MAINNET_GRADUATION_CHAINS, Settings, load_settings
 from .dashboard import (
-    DASHBOARD_INGEST_URL_ENV,
     DashboardPublishError,
+    SITES_BYPASS_TOKEN_ENV,
     build_dashboard_snapshot,
+    publish_dashboard_if_configured,
     publish_dashboard_from_env,
 )
 from .data import EvidenceBuilder, PublicDataClient
 from .domain import to_jsonable
 from .execution import ExecutionService, confirmation_code, telegram_approval_proof
+from .runner import (
+    COMMAND_API_URL_ENV,
+    RUNNER_ENABLED_ENV,
+    RUNNER_TOKEN_ENV,
+    CommandRunner,
+    RunnerProtocolError,
+)
 from .service import AnalysisRun, CryptoDeskService
 from .store import Store
 
@@ -280,6 +289,52 @@ def publish_dashboard_command(ctx: typer.Context) -> None:
     _emit(ctx, {"status": "PUBLISHED", "generated_at": snapshot.generated_at})
 
 
+@app.command()
+def runner(ctx: typer.Context) -> None:
+    """Chạy command runner outbound cho dashboard tương tác."""
+    settings = _load(ctx)
+    base_url = os.getenv(COMMAND_API_URL_ENV)
+    runner_token = os.getenv(RUNNER_TOKEN_ENV)
+    bypass_token = os.getenv(SITES_BYPASS_TOKEN_ENV)
+    missing = [
+        name
+        for name, value in (
+            (COMMAND_API_URL_ENV, base_url),
+            (RUNNER_TOKEN_ENV, runner_token),
+            (SITES_BYPASS_TOKEN_ENV, bypass_token),
+        )
+        if not value
+    ]
+    if missing:
+        _fail(f"Thiếu biến môi trường bắt buộc: {', '.join(missing)}")
+
+    worker = CommandRunner(
+        settings,
+        base_url=base_url,
+        runner_token=runner_token,
+        sites_bypass_token=bypass_token,
+        enabled=os.getenv(RUNNER_ENABLED_ENV, "1") == "1",
+        log=lambda message: typer.echo(message, err=True),
+    )
+    previous_term = signal.getsignal(signal.SIGTERM)
+    previous_int = signal.getsignal(signal.SIGINT)
+    signal.signal(
+        signal.SIGTERM,
+        lambda signum, frame: worker.stop(),
+    )
+    signal.signal(
+        signal.SIGINT,
+        lambda signum, frame: worker.stop(),
+    )
+    try:
+        worker.run_forever()
+    except RunnerProtocolError as exc:
+        _fail(str(exc))
+    finally:
+        signal.signal(signal.SIGTERM, previous_term)
+        signal.signal(signal.SIGINT, previous_int)
+
+
 def doctor_report(
     settings: Settings,
     store: Store,
@@ -489,18 +544,12 @@ def _load(ctx: typer.Context) -> Settings:
 
 
 def _publish_dashboard_if_configured(settings: Settings) -> None:
-    if not os.getenv(DASHBOARD_INGEST_URL_ENV):
-        return
-    store = None
-    try:
-        store = Store(settings.database)
-        snapshot = build_dashboard_snapshot(settings, store)
-        publish_dashboard_from_env(snapshot, strict=False)
-    except Exception as exc:
-        typer.echo(f"Warning: dashboard publish failed ({type(exc).__name__})", err=True)
-    finally:
-        if store is not None:
-            store.close()
+    warning = publish_dashboard_if_configured(
+        settings,
+        store_factory=Store,
+    )
+    if warning:
+        typer.echo(warning, err=True)
 
 
 def _emit(ctx: typer.Context, payload: Any) -> None:

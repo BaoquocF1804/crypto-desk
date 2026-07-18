@@ -57,11 +57,7 @@ class DispatchError(RuntimeError):
 
 
 def execution_mode() -> Literal["TESTNET_ORDER", "DRY_RUN"]:
-    return (
-        "TESTNET_ORDER"
-        if os.getenv("TESTNET_EXECUTION_ENABLED") == "1"
-        else "DRY_RUN"
-    )
+    return "TESTNET_ORDER" if os.getenv("TESTNET_EXECUTION_ENABLED") == "1" else "DRY_RUN"
 
 
 class CommandDispatcher:
@@ -137,19 +133,14 @@ class CommandDispatcher:
             provider=self.settings.models.provider,
             binance_environment=self.settings.binance.environment,
             binance_keys_present=bool(
-                os.getenv(f"BINANCE_{prefix}_API_KEY")
-                and os.getenv(f"BINANCE_{prefix}_API_SECRET")
+                os.getenv(f"BINANCE_{prefix}_API_KEY") and os.getenv(f"BINANCE_{prefix}_API_SECRET")
             ),
-            testnet_execution_enabled=(
-                os.getenv("TESTNET_EXECUTION_ENABLED") == "1"
-            ),
+            testnet_execution_enabled=(os.getenv("TESTNET_EXECUTION_ENABLED") == "1"),
             execution_mode=execution_mode(),
             database_schema_version=self._store().schema_version(),
             schedule={
                 "daily_utc": self.settings.schedule.daily_utc,
-                "health_minutes": str(
-                    self.settings.schedule.health_minutes
-                ),
+                "health_minutes": str(self.settings.schedule.health_minutes),
             },
         )
 
@@ -176,9 +167,7 @@ class CommandDispatcher:
                 symbol=item["symbol"],
                 passes=bool(item["passes"]),
                 score=str(item["score"]),
-                reasons=[
-                    str(reason) for reason in item.get("reasons", [])
-                ],
+                reasons=[str(reason) for reason in item.get("reasons", [])],
             )
         return SafeScreenItem(
             symbol=item.symbol,
@@ -194,9 +183,7 @@ class CommandDispatcher:
     ) -> SafeScreenResult:
         del args, operator_email
         results = self._service(committee=False).screen()
-        return SafeScreenResult(
-            items=[self._screen_item(item) for item in results]
-        )
+        return SafeScreenResult(items=[self._screen_item(item) for item in results])
 
     def _dispatch_analyze(
         self,
@@ -218,24 +205,10 @@ class CommandDispatcher:
             action=decision.action,
             conviction=str(decision.conviction),
             reason=decision.reason,
-            entry=(
-                None
-                if decision.entry is None
-                else str(decision.entry)
-            ),
-            stop=(
-                None if decision.stop is None else str(decision.stop)
-            ),
-            target=(
-                None
-                if decision.target is None
-                else str(decision.target)
-            ),
-            current_price=(
-                None
-                if run.current_price is None
-                else str(run.current_price)
-            ),
+            entry=(None if decision.entry is None else str(decision.entry)),
+            stop=(None if decision.stop is None else str(decision.stop)),
+            target=(None if decision.target is None else str(decision.target)),
+            current_price=(None if run.current_price is None else str(run.current_price)),
             ticket_id=run.ticket_id,
         )
 
@@ -249,13 +222,8 @@ class CommandDispatcher:
         return SafeDailyResult(
             status=result["status"],
             bucket=str(result["bucket"]),
-            run_ids=[
-                str(run_id) for run_id in result.get("run_ids", [])
-            ],
-            screen=[
-                self._screen_item(item)
-                for item in result.get("screen", [])
-            ],
+            run_ids=[str(run_id) for run_id in result.get("run_ids", [])],
+            screen=[self._screen_item(item) for item in result.get("screen", [])],
         )
 
     def _dispatch_health(
@@ -271,12 +239,8 @@ class CommandDispatcher:
         return SafeHealthResult(
             status=result["status"],
             bucket=str(result["bucket"]),
-            alerts=[
-                str(alert) for alert in result.get("alerts", [])
-            ],
-            run_ids=[
-                str(run_id) for run_id in result.get("run_ids", [])
-            ],
+            alerts=[str(alert) for alert in result.get("alerts", [])],
+            run_ids=[str(run_id) for run_id in result.get("run_ids", [])],
             reconciled_count=len(result.get("reconciled", [])),
         )
 
@@ -332,9 +296,7 @@ class CommandDispatcher:
                     run_id=row["run_id"],
                     symbol=row["symbol"],
                     created_at=row["created_at"],
-                    realized_return=_optional_str(
-                        payload.get("realized_return")
-                    ),
+                    realized_return=_optional_str(payload.get("realized_return")),
                     alpha=_optional_str(payload.get("alpha")),
                 )
             )
@@ -348,10 +310,7 @@ class CommandDispatcher:
             raise DispatchError("ENVIRONMENT_FORBIDDEN")
         if os.getenv("BINANCE_ENV") != "testnet":
             raise DispatchError("ENVIRONMENT_FORBIDDEN")
-        if (
-            ticket_environment is not None
-            and ticket_environment != "testnet"
-        ):
+        if ticket_environment is not None and ticket_environment != "testnet":
             raise DispatchError("ENVIRONMENT_FORBIDDEN")
 
     @staticmethod
@@ -388,9 +347,7 @@ class CommandDispatcher:
             target=str(ticket.target_price),
             created_at=ticket.created_at,
             expires_at=ticket.expires_at,
-            submission_status=(
-                None if submission is None else submission["status"]
-            ),
+            submission_status=(None if submission is None else submission["status"]),
             fingerprint=ticket_fingerprint(ticket),
         )
 

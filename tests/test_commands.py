@@ -111,12 +111,8 @@ def test_canonical_json_and_command_hash_are_stable():
 def test_ticket_fingerprint_changes_with_any_covered_field():
     base = ticket_fingerprint(make_ticket())
     assert base == ticket_fingerprint(make_ticket())
-    assert base != ticket_fingerprint(
-        make_ticket(status="APPROVED")
-    )
-    assert base != ticket_fingerprint(
-        make_ticket(quantity=Decimal("0.00026"))
-    )
+    assert base != ticket_fingerprint(make_ticket(status="APPROVED"))
+    assert base != ticket_fingerprint(make_ticket(quantity=Decimal("0.00026")))
     assert len(base) == 64
 
 
@@ -156,15 +152,9 @@ def test_every_safe_result_model_declares_no_forbidden_field():
 
     for name in dir(commands):
         model = getattr(commands, name)
-        if (
-            isinstance(model, type)
-            and name.startswith("Safe")
-            and hasattr(model, "model_fields")
-        ):
+        if isinstance(model, type) and name.startswith("Safe") and hasattr(model, "model_fields"):
             for field in model.model_fields:
-                assert (
-                    field.lower() not in FORBIDDEN_RESULT_KEYS
-                ), f"{name}.{field}"
+                assert field.lower() not in FORBIDDEN_RESULT_KEYS, f"{name}.{field}"
 
 
 def test_preview_and_execute_results_round_trip():
@@ -187,19 +177,14 @@ def test_preview_and_execute_results_round_trip():
         submission_status=None,
         fingerprint="a" * 64,
     )
-    assert (
-        ensure_safe_result(preview)["fingerprint"] == "a" * 64
-    )
+    assert ensure_safe_result(preview)["fingerprint"] == "a" * 64
     execute = SafeExecuteResult(
         action="approve",
         ticket_id="t-1",
         status="APPROVED_DRY_RUN",
     )
     assert ensure_safe_result(execute)["status"] == "APPROVED_DRY_RUN"
-    assert (
-        "execute" in EXECUTION_KINDS
-        and "execute" in STATE_CHANGING_KINDS
-    )
+    assert "execute" in EXECUTION_KINDS and "execute" in STATE_CHANGING_KINDS
 
 
 def test_result_size_fails_closed():

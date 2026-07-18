@@ -25,9 +25,7 @@ COMMAND_KINDS = (
     "execute",
 )
 EXECUTION_KINDS = frozenset({"preview", "execute"})
-STATE_CHANGING_KINDS = frozenset(
-    {"sync", "analyze", "daily", "health", "execute"}
-)
+STATE_CHANGING_KINDS = frozenset({"sync", "analyze", "daily", "health", "execute"})
 
 MAX_ARGS_BYTES = 4096
 MAX_RESULT_BYTES = 32768
@@ -73,9 +71,7 @@ def command_hash(
     kind: str,
     args: dict[str, Any],
 ) -> str:
-    material = canonical_json(
-        {"args": args, "id": command_id, "kind": kind}
-    )
+    material = canonical_json({"args": args, "id": command_id, "kind": kind})
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
@@ -96,12 +92,7 @@ _FINGERPRINT_FIELDS = (
 
 
 def ticket_fingerprint(ticket: TradeTicket) -> str:
-    material = canonical_json(
-        {
-            name: getattr(ticket, name)
-            for name in _FINGERPRINT_FIELDS
-        }
-    )
+    material = canonical_json({name: getattr(ticket, name) for name in _FINGERPRINT_FIELDS})
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
@@ -333,9 +324,7 @@ def ensure_safe_result(
     dumped = model.model_dump(mode="json")
     _walk_forbidden(dumped)
     if len(canonical_json(dumped).encode("utf-8")) > MAX_RESULT_BYTES:
-        raise UnsafeResultError(
-            "safe result exceeds the 32 KiB limit"
-        )
+        raise UnsafeResultError("safe result exceeds the 32 KiB limit")
     return dumped
 
 
@@ -343,9 +332,7 @@ def _walk_forbidden(value: Any) -> None:
     if isinstance(value, dict):
         for key, item in value.items():
             if key.lower() in FORBIDDEN_RESULT_KEYS:
-                raise UnsafeResultError(
-                    f"forbidden result key: {key}"
-                )
+                raise UnsafeResultError(f"forbidden result key: {key}")
             _walk_forbidden(item)
     elif isinstance(value, (list, tuple)):
         for item in value:

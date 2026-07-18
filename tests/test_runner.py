@@ -227,19 +227,10 @@ def test_restart_recovery_never_repeats_a_running_command(
 
     runner.recover()
     assert store.journal_entry("cmd-exec")["state"] == "NEEDS_REVIEW"
-    assert (
-        store.journal_entry("cmd-exec")["error_code"]
-        == "EXECUTION_UNCERTAIN"
-    )
+    assert store.journal_entry("cmd-exec")["error_code"] == "EXECUTION_UNCERTAIN"
     assert store.journal_entry("cmd-read")["state"] == "FAILED"
-    assert (
-        store.journal_entry("cmd-read")["error_code"]
-        == "RUNNER_RESTART"
-    )
-    statuses = {
-        report["command_id"]: report["status"]
-        for report in sites.reports
-    }
+    assert store.journal_entry("cmd-read")["error_code"] == "RUNNER_RESTART"
+    statuses = {report["command_id"]: report["status"] for report in sites.reports}
     assert statuses == {
         "cmd-exec": "NEEDS_REVIEW",
         "cmd-read": "FAILED",
@@ -294,10 +285,7 @@ def test_unexpected_exception_maps_by_kind(tmp_path, monkeypatch):
     dispatcher.raise_for_kind["execute"] = TimeoutError("ambiguous")
     runner.process_one()
     assert sites.reports[-1]["status"] == "NEEDS_REVIEW"
-    assert (
-        sites.reports[-1]["error_code"]
-        == "EXECUTION_UNCERTAIN"
-    )
+    assert sites.reports[-1]["error_code"] == "EXECUTION_UNCERTAIN"
 
     sites.queue.append(make_command("cmd-y", kind="screen"))
     dispatcher.raise_for_kind["screen"] = RuntimeError("boom")
@@ -325,9 +313,7 @@ def test_dispatch_error_reports_safe_code(tmp_path, monkeypatch):
         )
     )
     runner, _, dispatcher = make_runner(tmp_path, sites)
-    dispatcher.raise_for_kind["execute"] = DispatchError(
-        "TICKET_CHANGED"
-    )
+    dispatcher.raise_for_kind["execute"] = DispatchError("TICKET_CHANGED")
     runner.process_one()
     assert sites.reports[-1]["status"] == "FAILED"
     assert sites.reports[-1]["error_code"] == "TICKET_CHANGED"
@@ -384,7 +370,4 @@ def test_runner_sends_both_auth_headers(tmp_path):
     )
     runner.heartbeat()
     assert captured["authorization"] == "Bearer runner-token"
-    assert (
-        captured["oai-sites-authorization"]
-        == "Bearer bypass-token"
-    )
+    assert captured["oai-sites-authorization"] == "Bearer bypass-token"

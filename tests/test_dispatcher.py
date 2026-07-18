@@ -75,9 +75,7 @@ class FakeService:
             "status": "COMPLETED",
             "bucket": "2026-07-17",
             "run_ids": ["run-1"],
-            "screen": [
-                {"symbol": "BTCUSDT", "passes": True, "score": "2", "reasons": []}
-            ],
+            "screen": [{"symbol": "BTCUSDT", "passes": True, "score": "2", "reasons": []}],
         }
 
     def health(self, *, due: bool = False):
@@ -262,9 +260,7 @@ def make_execution_dispatcher(
     execution = FakeExecution()
     dispatcher = CommandDispatcher(
         settings,
-        service_factory=lambda **kwargs: pytest.fail(
-            "service must not be built"
-        ),
+        service_factory=lambda **kwargs: pytest.fail("service must not be built"),
         execution_factory=lambda: execution,
         store_factory=lambda: store,
         now=lambda: NOW,
@@ -287,9 +283,7 @@ def test_preview_returns_sanitized_ticket_with_fingerprint(
     )
     assert isinstance(result, SafePreviewResult)
     assert result.execution_mode == "DRY_RUN"
-    assert result.fingerprint == ticket_fingerprint(
-        store.ticket("ticket-1")
-    )
+    assert result.fingerprint == ticket_fingerprint(store.ticket("ticket-1"))
     assert result.entry == "100000.00"
     assert result.submission_status is None
 

@@ -189,6 +189,7 @@ def test_public_commands_exist():
         "live-code",
         "reflections",
         "publish-dashboard",
+        "runner",
     ):
         assert command in result.stdout
 
@@ -883,3 +884,69 @@ def test_dashboard_hook_swallows_store_open_failure(tmp_path: Path, monkeypatch)
     assert result.exit_code == 0
     assert "nav_usdt" in result.output
     assert "Warning: dashboard publish failed (OSError)" in result.output
+
+
+def test_runner_command_builds_and_runs_the_runner(
+    tmp_path,
+    monkeypatch,
+):
+    config = _write_config(tmp_path)
+    monkeypatch.setenv(
+        "CRYPTO_DESK_COMMAND_API_URL",
+        "https://sites.example/api",
+    )
+    monkeypatch.setenv(
+        "CRYPTO_DESK_RUNNER_TOKEN",
+        "runner-token",
+    )
+    monkeypatch.setenv(
+        "CRYPTO_DESK_SITES_BYPASS_TOKEN",
+        "bypass-token",
+    )
+    monkeypatch.setenv(
+        "CRYPTO_DESK_COMMAND_RUNNER_ENABLED",
+        "1",
+    )
+    captured = {}
+
+    class FakeRunner:
+        def __init__(self, settings, **kwargs):
+            captured["kwargs"] = kwargs
+
+        def run_forever(self):
+            captured["ran"] = True
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr("crypto_desk.cli.CommandRunner", FakeRunner)
+    result = CliRunner().invoke(
+        app,
+        ["--config", str(config), "runner"],
+    )
+
+    assert result.exit_code == 0
+    assert captured["ran"] is True
+    assert captured["kwargs"]["base_url"] == "https://sites.example/api"
+    assert captured["kwargs"]["runner_token"] == "runner-token"
+    assert captured["kwargs"]["sites_bypass_token"] == "bypass-token"
+    assert captured["kwargs"]["enabled"] is True
+    assert "runner-token" not in result.output
+
+
+def test_runner_command_requires_all_env_vars(
+    tmp_path,
+    monkeypatch,
+):
+    config = _write_config(tmp_path)
+    monkeypatch.setenv("CRYPTO_DESK_COMMAND_API_URL", "")
+    monkeypatch.setenv("CRYPTO_DESK_RUNNER_TOKEN", "")
+    monkeypatch.setenv("CRYPTO_DESK_SITES_BYPASS_TOKEN", "")
+
+    result = CliRunner().invoke(
+        app,
+        ["--config", str(config), "runner"],
+    )
+
+    assert result.exit_code == 2
+    assert "CRYPTO_DESK_COMMAND_API_URL" in result.output

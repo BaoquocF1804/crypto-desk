@@ -450,10 +450,7 @@ def publish_dashboard_if_configured(
         publish_dashboard_from_env(snapshot, strict=False)
         return None
     except Exception as exc:  # noqa: BLE001 - intentionally best-effort
-        return (
-            "Warning: dashboard publish failed "
-            f"({type(exc).__name__})"
-        )
+        return f"Warning: dashboard publish failed ({type(exc).__name__})"
     finally:
         if store is not None:
             store.close()

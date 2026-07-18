@@ -163,6 +163,29 @@ hermes mcp test openbb
 
 Crypto Desk vẫn phải chạy được khi service tùy chọn này dừng.
 
+## Command runner cho dashboard tương tác
+
+Runner là tiến trình outbound duy nhất phục vụ command deck trên dashboard:
+
+1. Điền `CRYPTO_DESK_COMMAND_API_URL` (ví dụ `https://<site>/api`),
+   `CRYPTO_DESK_RUNNER_TOKEN` (token riêng, không dùng lại ingest token) và
+   `CRYPTO_DESK_SITES_BYPASS_TOKEN` vào `.env` có quyền `0600`.
+2. Chạy thử foreground bằng `scripts/desk runner`; nhấn Ctrl-C để dừng sạch.
+3. Chạy thường trực bằng systemd user unit:
+
+```bash
+mkdir -p ~/.config/systemd/user
+ln -s "$PWD/services/crypto-desk-runner.service" \
+  ~/.config/systemd/user/crypto-desk-runner.service
+systemctl --user daemon-reload
+systemctl --user enable --now crypto-desk-runner
+```
+
+Kill switch: đặt `CRYPTO_DESK_COMMAND_RUNNER_ENABLED=0` rồi restart service.
+Runner vẫn báo cáo nốt command đã journal nhưng không claim command mới.
+Mainnet không bao giờ được thực thi từ web; mọi lệnh execute yêu cầu
+`BINANCE_ENV=testnet` ở tất cả các lớp.
+
 ## Testnet smoke và rollback
 
 Trình tự smoke tối thiểu:
