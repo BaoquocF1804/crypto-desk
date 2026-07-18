@@ -183,6 +183,26 @@ class Store:
             "report_dir": row["report_dir"],
         }
 
+    def latest_valid_run(self, symbol: str) -> dict[str, Any] | None:
+        rows = self.db.execute(
+            """
+            SELECT * FROM research_runs
+            WHERE symbol=? ORDER BY cutoff DESC LIMIT 100
+            """,
+            (symbol,),
+        ).fetchall()
+        for row in rows:
+            decision = json.loads(row["decision"])
+            if decision.get("evidence_ids"):
+                return {
+                    "id": row["id"],
+                    "symbol": row["symbol"],
+                    "cutoff": row["cutoff"],
+                    "decision": decision,
+                    "report_dir": row["report_dir"],
+                }
+        return None
+
     def save_ticket(self, ticket: TradeTicket) -> None:
         self.db.execute(
             """
@@ -388,6 +408,16 @@ class Store:
         )
         self.db.commit()
 
+    def recent_order_events(self, limit: int = 5) -> list[dict[str, str]]:
+        rows = self.db.execute(
+            """
+            SELECT ticket_id,status,event_time FROM order_events
+            ORDER BY event_time DESC, id DESC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def completed_mainnet_chains(self) -> int:
         placeholders = ",".join("?" for _ in TERMINAL_CHAIN_STATES)
         row = self.db.execute(
@@ -409,6 +439,16 @@ class Store:
             ).fetchone()
             is not None
         )
+
+    def latest_scheduled_run(self, kind: str) -> dict[str, str] | None:
+        row = self.db.execute(
+            """
+            SELECT kind,bucket,completed_at FROM scheduled_runs
+            WHERE kind=? ORDER BY completed_at DESC LIMIT 1
+            """,
+            (kind,),
+        ).fetchone()
+        return dict(row) if row else None
 
     def mark_scheduled(self, kind: str, bucket: str) -> bool:
         cursor = self.db.execute(

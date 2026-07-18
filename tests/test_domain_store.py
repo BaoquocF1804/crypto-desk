@@ -121,3 +121,116 @@ def test_schedule_bucket_and_reflection_are_idempotent(tmp_path: Path):
 
     assert store.save_reflection("run-1", "BTCUSDT", {"return": Decimal("0.05")})
     assert not store.save_reflection("run-1", "BTCUSDT", {"return": Decimal("0.10")})
+
+
+def make_decision(*, evidence_ids: tuple[str, ...] = (), action: str = "HOLD") -> ResearchDecision:
+    return ResearchDecision(
+        symbol="BTCUSDT",
+        action=action,
+        conviction=Decimal("7.5"),
+        bull_case="Trend is constructive.",
+        bear_case="Funding is elevated.",
+        catalysts=("ETF flow",),
+        invalidation="Daily close below support.",
+        entry=Decimal("100000"),
+        stop=Decimal("90000"),
+        target=Decimal("120000"),
+        evidence_ids=evidence_ids,
+        reason="committee decision" if evidence_ids else "binance evidence is from the future",
+    )
+
+
+def test_latest_valid_run_falls_back_past_a_blocked_attempt(tmp_path: Path):
+    store = Store(tmp_path / "crypto.db")
+    valid = make_decision(evidence_ids=("evidence-1",))
+    blocked = make_decision(evidence_ids=())
+
+    store.save_run("run-1", "2026-07-17T00:00:00+00:00", valid, Path("artifacts/run-1"))
+    store.save_run("run-2", "2026-07-18T00:00:00+00:00", blocked, Path("artifacts/run-2"))
+
+    latest_attempt = store.latest_run("BTCUSDT")
+    assert latest_attempt is not None
+    assert latest_attempt["id"] == "run-2"
+    assert latest_attempt["decision"]["evidence_ids"] == []
+
+    latest_valid = store.latest_valid_run("BTCUSDT")
+    assert latest_valid is not None
+    assert latest_valid["id"] == "run-1"
+    assert latest_valid["decision"]["evidence_ids"] == ["evidence-1"]
+
+
+def test_latest_valid_run_accepts_evidence_backed_no_trade(tmp_path: Path):
+    store = Store(tmp_path / "crypto.db")
+    no_trade_with_evidence = make_decision(evidence_ids=("evidence-1",), action="NO_TRADE")
+
+    store.save_run("run-1", "2026-07-18T00:00:00+00:00", no_trade_with_evidence, Path("artifacts/run-1"))
+
+    latest_valid = store.latest_valid_run("BTCUSDT")
+    assert latest_valid is not None
+    assert latest_valid["decision"]["action"] == "NO_TRADE"
+    assert latest_valid["decision"]["evidence_ids"] == ["evidence-1"]
+
+
+def test_latest_valid_run_returns_none_without_any_valid_attempt(tmp_path: Path):
+    store = Store(tmp_path / "crypto.db")
+    blocked = make_decision(evidence_ids=())
+
+    store.save_run("run-1", "2026-07-18T00:00:00+00:00", blocked, Path("artifacts/run-1"))
+
+    assert store.latest_valid_run("BTCUSDT") is None
+    assert store.latest_valid_run("ETHUSDT") is None
+
+
+def test_latest_scheduled_run_orders_by_completed_at_not_rowid(tmp_path: Path):
+    store = Store(tmp_path / "crypto.db")
+    # Insert the newer completed_at first so a rowid-based ORDER BY would pick the wrong row.
+    store.db.execute(
+        "INSERT INTO scheduled_runs(kind,bucket,completed_at) VALUES (?,?,?)",
+        ("health", "2026-07-18T00:15Z", "2026-07-18T00:20:00+00:00"),
+    )
+    store.db.execute(
+        "INSERT INTO scheduled_runs(kind,bucket,completed_at) VALUES (?,?,?)",
+        ("health", "2026-07-17T00:15Z", "2026-07-17T00:20:00+00:00"),
+    )
+    store.db.commit()
+
+    latest = store.latest_scheduled_run("health")
+
+    assert latest is not None
+    assert latest["bucket"] == "2026-07-18T00:15Z"
+    assert latest["completed_at"] == "2026-07-18T00:20:00+00:00"
+
+
+def test_latest_scheduled_run_returns_none_when_never_run(tmp_path: Path):
+    store = Store(tmp_path / "crypto.db")
+
+    assert store.latest_scheduled_run("health") is None
+
+
+def test_recent_order_events_omit_raw_payload(tmp_path: Path):
+    store = Store(tmp_path / "crypto.db")
+    store.save_submission("ticket-1", "testnet", "desk_ticket_1", {"status": "NEW"})
+
+    store.record_order_event("ticket-1", "FILLED", {"secret": "nope", "executedQty": "0.00025"})
+
+    events = store.recent_order_events(limit=5)
+
+    assert len(events) == 1
+    assert events[0]["ticket_id"] == "ticket-1"
+    assert events[0]["status"] == "FILLED"
+    assert "event_time" in events[0]
+    assert set(events[0]) == {"ticket_id", "status", "event_time"}
+
+
+def test_recent_order_events_respects_limit_and_recency(tmp_path: Path):
+    store = Store(tmp_path / "crypto.db")
+    store.save_submission("ticket-1", "testnet", "desk_ticket_1", {"status": "NEW"})
+    store.record_order_event("ticket-1", "NEW", {"executedQty": "0"})
+    store.record_order_event("ticket-1", "PARTIALLY_FILLED", {"executedQty": "0.0001"})
+    store.record_order_event("ticket-1", "FILLED", {"executedQty": "0.00025"})
+
+    events = store.recent_order_events(limit=2)
+
+    assert len(events) == 2
+    assert events[0]["status"] == "FILLED"
+    assert events[1]["status"] == "PARTIALLY_FILLED"
