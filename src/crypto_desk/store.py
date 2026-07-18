@@ -408,13 +408,16 @@ class Store:
         )
         self.db.commit()
 
-    def recent_order_events(self, limit: int = 5) -> list[dict[str, str]]:
+    def recent_order_events(self, limit: int, environment: Environment) -> list[dict[str, str]]:
         rows = self.db.execute(
             """
-            SELECT ticket_id,status,event_time FROM order_events
-            ORDER BY event_time DESC, id DESC LIMIT ?
+            SELECT oe.ticket_id,oe.status,oe.event_time
+            FROM order_events oe
+            JOIN submissions s ON s.ticket_id = oe.ticket_id
+            WHERE s.environment = ?
+            ORDER BY oe.event_time DESC, oe.id DESC LIMIT ?
             """,
-            (limit,),
+            (environment, limit),
         ).fetchall()
         return [dict(row) for row in rows]
 

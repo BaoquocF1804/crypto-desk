@@ -274,7 +274,7 @@ def _build_operations(store: Store, environment: Environment) -> OperationsSecti
             at=event["event_time"],
             summary=f"Order {event['status'].lower()}",
         )
-        for event in store.recent_order_events(limit=5)
+        for event in store.recent_order_events(limit=5, environment=environment)
     ]
     return OperationsSection(
         tickets_total=len(tickets),

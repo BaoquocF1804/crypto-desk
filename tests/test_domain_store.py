@@ -163,7 +163,9 @@ def test_latest_valid_run_accepts_evidence_backed_no_trade(tmp_path: Path):
     store = Store(tmp_path / "crypto.db")
     no_trade_with_evidence = make_decision(evidence_ids=("evidence-1",), action="NO_TRADE")
 
-    store.save_run("run-1", "2026-07-18T00:00:00+00:00", no_trade_with_evidence, Path("artifacts/run-1"))
+    store.save_run(
+        "run-1", "2026-07-18T00:00:00+00:00", no_trade_with_evidence, Path("artifacts/run-1")
+    )
 
     latest_valid = store.latest_valid_run("BTCUSDT")
     assert latest_valid is not None
@@ -213,7 +215,7 @@ def test_recent_order_events_omit_raw_payload(tmp_path: Path):
 
     store.record_order_event("ticket-1", "FILLED", {"secret": "nope", "executedQty": "0.00025"})
 
-    events = store.recent_order_events(limit=5)
+    events = store.recent_order_events(limit=5, environment="testnet")
 
     assert len(events) == 1
     assert events[0]["ticket_id"] == "ticket-1"
@@ -229,8 +231,23 @@ def test_recent_order_events_respects_limit_and_recency(tmp_path: Path):
     store.record_order_event("ticket-1", "PARTIALLY_FILLED", {"executedQty": "0.0001"})
     store.record_order_event("ticket-1", "FILLED", {"executedQty": "0.00025"})
 
-    events = store.recent_order_events(limit=2)
+    events = store.recent_order_events(limit=2, environment="testnet")
 
     assert len(events) == 2
     assert events[0]["status"] == "FILLED"
     assert events[1]["status"] == "PARTIALLY_FILLED"
+
+
+def test_recent_order_events_are_scoped_to_environment(tmp_path: Path):
+    store = Store(tmp_path / "crypto.db")
+    store.save_submission("ticket-testnet", "testnet", "desk_ticket_testnet", {"status": "NEW"})
+    store.save_submission("ticket-mainnet", "mainnet", "desk_ticket_mainnet", {"status": "NEW"})
+
+    store.record_order_event("ticket-testnet", "FILLED", {"executedQty": "0.00025"})
+    store.record_order_event("ticket-mainnet", "FILLED", {"executedQty": "0.00025"})
+
+    testnet_events = store.recent_order_events(limit=5, environment="testnet")
+    mainnet_events = store.recent_order_events(limit=5, environment="mainnet")
+
+    assert [event["ticket_id"] for event in testnet_events] == ["ticket-testnet"]
+    assert [event["ticket_id"] for event in mainnet_events] == ["ticket-mainnet"]
