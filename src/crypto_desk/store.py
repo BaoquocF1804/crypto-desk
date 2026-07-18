@@ -94,6 +94,17 @@ class Store:
               created_at TEXT NOT NULL,
               payload TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS command_journal (
+              command_id TEXT PRIMARY KEY,
+              command_hash TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              state TEXT NOT NULL,
+              reported INTEGER NOT NULL DEFAULT 0,
+              result TEXT,
+              error_code TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
             """
         )
         if self.db.execute("SELECT COUNT(*) FROM schema_meta").fetchone()[0] == 0:
@@ -111,6 +122,24 @@ class Store:
                     """
                 )
             self.db.execute("UPDATE schema_meta SET version=2")
+            version = 2
+        if version < 3:
+            self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS command_journal (
+                  command_id TEXT PRIMARY KEY,
+                  command_hash TEXT NOT NULL,
+                  kind TEXT NOT NULL,
+                  state TEXT NOT NULL,
+                  reported INTEGER NOT NULL DEFAULT 0,
+                  result TEXT,
+                  error_code TEXT,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                )
+                """
+            )
+            self.db.execute("UPDATE schema_meta SET version=3")
         self.db.commit()
 
     def close(self) -> None:
@@ -498,3 +527,108 @@ class Store:
             }
             for row in rows
         ]
+
+    def journal_start(
+        self,
+        command_id: str,
+        command_hash: str,
+        kind: str,
+    ) -> None:
+        now = iso()
+        try:
+            self.db.execute(
+                "INSERT INTO command_journal("
+                "command_id, command_hash, kind, state, reported,"
+                " created_at, updated_at"
+                ") VALUES (?, ?, ?, 'RUNNING', 0, ?, ?)",
+                (command_id, command_hash, kind, now, now),
+            )
+        except sqlite3.IntegrityError:
+            raise ValueError(
+                f"Command {command_id} is already journaled"
+            ) from None
+        self.db.commit()
+
+    def journal_entry(
+        self,
+        command_id: str,
+    ) -> dict[str, Any] | None:
+        row = self.db.execute(
+            "SELECT command_id, command_hash, kind, state,"
+            " reported, result, error_code, created_at, updated_at"
+            " FROM command_journal WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+        return self._journal_row(row) if row else None
+
+    def journal_finish(
+        self,
+        command_id: str,
+        *,
+        state: str,
+        result: dict[str, Any] | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        cursor = self.db.execute(
+            "UPDATE command_journal SET state = ?, result = ?,"
+            " error_code = ?, updated_at = ? WHERE command_id = ?",
+            (
+                state,
+                _json(result) if result is not None else None,
+                error_code,
+                iso(),
+                command_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError(
+                f"Command {command_id} has no journal entry"
+            )
+        self.db.commit()
+
+    def journal_mark_reported(self, command_id: str) -> None:
+        cursor = self.db.execute(
+            "UPDATE command_journal SET reported = 1,"
+            " updated_at = ? WHERE command_id = ?",
+            (iso(), command_id),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError(
+                f"Command {command_id} has no journal entry"
+            )
+        self.db.commit()
+
+    def journal_running(self) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            "SELECT command_id, command_hash, kind, state,"
+            " reported, result, error_code, created_at, updated_at"
+            " FROM command_journal WHERE state = 'RUNNING'"
+            " ORDER BY created_at",
+        ).fetchall()
+        return [self._journal_row(row) for row in rows]
+
+    def journal_unreported(self) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            "SELECT command_id, command_hash, kind, state,"
+            " reported, result, error_code, created_at, updated_at"
+            " FROM command_journal WHERE state != 'RUNNING'"
+            " AND reported = 0 ORDER BY created_at",
+        ).fetchall()
+        return [self._journal_row(row) for row in rows]
+
+    def _journal_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "command_id": row["command_id"],
+            "command_hash": row["command_hash"],
+            "kind": row["kind"],
+            "state": row["state"],
+            "reported": bool(row["reported"]),
+            "result": (
+                json.loads(row["result"])
+                if row["result"]
+                else None
+            ),
+            "error_code": row["error_code"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }

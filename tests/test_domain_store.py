@@ -1,3 +1,4 @@
+import sqlite3
 from decimal import Decimal
 from pathlib import Path
 
@@ -23,10 +24,71 @@ def make_ticket(environment: str = "testnet") -> TradeTicket:
     )
 
 
-def test_store_uses_schema_version_two(tmp_path: Path):
+def test_store_uses_schema_version_three(tmp_path: Path):
     store = Store(tmp_path / "crypto.db")
 
-    assert store.schema_version() == 2
+    assert store.schema_version() == 3
+
+
+def test_journal_lifecycle_first_run_finish_report(tmp_path: Path):
+    store = Store(tmp_path / "crypto.db")
+
+    assert store.journal_entry("cmd-1") is None
+    store.journal_start("cmd-1", "hash-1", "sync")
+    entry = store.journal_entry("cmd-1")
+    assert entry["state"] == "RUNNING"
+    assert entry["reported"] is False
+
+    store.journal_finish(
+        "cmd-1",
+        state="SUCCEEDED",
+        result={"nav_usdt": "1"},
+    )
+    assert store.journal_running() == []
+    unreported = store.journal_unreported()
+    assert [item["command_id"] for item in unreported] == ["cmd-1"]
+    assert unreported[0]["result"] == {"nav_usdt": "1"}
+
+    store.journal_mark_reported("cmd-1")
+    assert store.journal_unreported() == []
+
+
+def test_journal_duplicate_start_raises(tmp_path: Path):
+    store = Store(tmp_path / "crypto.db")
+    store.journal_start("cmd-1", "hash-1", "sync")
+
+    with pytest.raises(ValueError, match="cmd-1"):
+        store.journal_start("cmd-1", "hash-2", "sync")
+
+
+def test_journal_failed_state_records_error_code(tmp_path: Path):
+    store = Store(tmp_path / "crypto.db")
+    store.journal_start("cmd-2", "hash-2", "execute")
+    store.journal_finish(
+        "cmd-2",
+        state="NEEDS_REVIEW",
+        error_code="EXECUTION_UNCERTAIN",
+    )
+
+    entry = store.journal_entry("cmd-2")
+    assert entry["state"] == "NEEDS_REVIEW"
+    assert entry["error_code"] == "EXECUTION_UNCERTAIN"
+    assert entry["result"] is None
+
+
+def test_existing_v2_database_migrates_to_v3(tmp_path: Path):
+    path = tmp_path / "crypto.db"
+    first = Store(path)
+    first.close()
+    second = sqlite3.connect(path)
+    second.execute("DROP TABLE command_journal")
+    second.execute("UPDATE schema_meta SET version = 2")
+    second.commit()
+    second.close()
+
+    migrated = Store(path)
+    assert migrated.schema_version() == 3
+    migrated.journal_start("cmd-1", "hash-1", "sync")
 
 
 def test_snapshot_round_trip_preserves_decimal_values(tmp_path: Path):
