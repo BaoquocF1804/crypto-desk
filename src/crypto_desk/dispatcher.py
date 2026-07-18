@@ -130,7 +130,11 @@ class CommandDispatcher:
         return SafeDoctorResult(
             python=platform.python_version(),
             package_versions=versions,
-            provider=self.settings.models.provider,
+            provider=getattr(
+                self.settings.models,
+                "provider",
+                "openai",
+            ),
             binance_environment=self.settings.binance.environment,
             binance_keys_present=bool(
                 os.getenv(f"BINANCE_{prefix}_API_KEY") and os.getenv(f"BINANCE_{prefix}_API_SECRET")

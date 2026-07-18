@@ -173,6 +173,29 @@ def test_doctor_is_offline_and_curated(tmp_path: Path, monkeypatch):
     assert "dashboard-secret-sentinel" not in str(dumped)
 
 
+def test_doctor_supports_settings_without_provider_field(tmp_path: Path):
+    @dataclass(frozen=True)
+    class LegacyModels:
+        quick: str = "gpt-5.4-mini"
+        deep: str = "gpt-5.5"
+        debate_rounds: int = 2
+
+    dispatcher, _ = make_dispatcher(tmp_path)
+    object.__setattr__(
+        dispatcher.settings,
+        "models",
+        LegacyModels(),
+    )
+
+    result = dispatcher.dispatch(
+        "doctor",
+        {},
+        operator_email=OPERATOR,
+    )
+
+    assert result.provider == "openai"
+
+
 def test_non_testnet_command_envelope_is_forbidden(tmp_path: Path):
     dispatcher, _ = make_dispatcher(tmp_path)
     with pytest.raises(DispatchError) as excinfo:
