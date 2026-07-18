@@ -433,3 +433,27 @@ def publish_dashboard_from_env(snapshot: DashboardSnapshot, *, strict: bool) -> 
         ingest_token=ingest_token,
         sites_bypass_token=sites_bypass_token,
     )
+
+
+def publish_dashboard_if_configured(
+    settings: Settings,
+    *,
+    store_factory: Callable[..., Store] = Store,
+) -> str | None:
+    """Best-effort publish after a state-changing command."""
+    if not os.getenv(DASHBOARD_INGEST_URL_ENV):
+        return None
+    store = None
+    try:
+        store = store_factory(settings.database)
+        snapshot = build_dashboard_snapshot(settings, store)
+        publish_dashboard_from_env(snapshot, strict=False)
+        return None
+    except Exception as exc:  # noqa: BLE001 - intentionally best-effort
+        return (
+            "Warning: dashboard publish failed "
+            f"({type(exc).__name__})"
+        )
+    finally:
+        if store is not None:
+            store.close()
