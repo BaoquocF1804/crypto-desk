@@ -4,7 +4,9 @@ import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
+import httpx
 from typer.testing import CliRunner
 
 from crypto_desk.broker import SpotQuote
@@ -186,6 +188,7 @@ def test_public_commands_exist():
         "orders",
         "live-code",
         "reflections",
+        "publish-dashboard",
     ):
         assert command in result.stdout
 
@@ -644,3 +647,214 @@ def test_doctor_reports_news_feed_visibility(tmp_path: Path):
     report = doctor_report(settings, store, online=False)
 
     assert report["news"] == {"feeds_configured": 0, "analyze_possible": False}
+
+
+def _write_config(tmp_path: Path) -> Path:
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"database: {tmp_path / 'crypto.sqlite3'}\nsymbols: [BTCUSDT]\n",
+        encoding="utf-8",
+    )
+    return config
+
+
+def _install_publish_hook_spy(monkeypatch) -> list[Any]:
+    calls: list[Any] = []
+    monkeypatch.setattr(
+        "crypto_desk.cli._publish_dashboard_if_configured",
+        lambda settings: calls.append(settings),
+    )
+    return calls
+
+
+DASHBOARD_URL = "https://dashboard.example/api/ingest"
+
+
+def test_publish_dashboard_command_posts_snapshot_and_emits_published_status(
+    tmp_path: Path, monkeypatch
+):
+    config = _write_config(tmp_path)
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["headers"] = request.headers
+        return httpx.Response(204)
+
+    monkeypatch.setenv("CRYPTO_DESK_DASHBOARD_INGEST_URL", DASHBOARD_URL)
+    monkeypatch.setenv("CRYPTO_DESK_DASHBOARD_INGEST_TOKEN", "ingest-secret")
+    monkeypatch.setenv("CRYPTO_DESK_SITES_BYPASS_TOKEN", "bypass-secret")
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        "crypto_desk.dashboard.httpx.Client",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = CliRunner().invoke(app, ["--config", str(config), "--json", "publish-dashboard"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "PUBLISHED"
+    assert captured["url"] == DASHBOARD_URL
+    assert captured["headers"]["Authorization"] == "Bearer ingest-secret"
+    assert "ingest-secret" not in result.output
+    assert "bypass-secret" not in result.output
+
+
+def test_publish_dashboard_command_fails_clearly_when_env_var_missing(tmp_path: Path, monkeypatch):
+    config = _write_config(tmp_path)
+    monkeypatch.delenv("CRYPTO_DESK_DASHBOARD_INGEST_URL", raising=False)
+    monkeypatch.delenv("CRYPTO_DESK_DASHBOARD_INGEST_TOKEN", raising=False)
+    monkeypatch.delenv("CRYPTO_DESK_SITES_BYPASS_TOKEN", raising=False)
+
+    result = CliRunner().invoke(app, ["--config", str(config), "publish-dashboard"])
+
+    assert result.exit_code == 2
+    assert "CRYPTO_DESK_DASHBOARD_INGEST_URL" in result.output
+
+
+def test_dashboard_hook_fires_after_sync(tmp_path: Path, monkeypatch):
+    config = _write_config(tmp_path)
+    calls = _install_publish_hook_spy(monkeypatch)
+
+    class FakeService:
+        def sync(self):
+            return {"nav_usdt": "1"}
+
+    monkeypatch.setattr("crypto_desk.cli._service", lambda settings, **kwargs: FakeService())
+
+    result = CliRunner().invoke(app, ["--config", str(config), "--json", "sync"])
+
+    assert result.exit_code == 0
+    assert len(calls) == 1
+
+
+def test_dashboard_hook_fires_after_analyze(tmp_path: Path, monkeypatch):
+    config = _write_config(tmp_path)
+    calls = _install_publish_hook_spy(monkeypatch)
+
+    class FakeService:
+        def analyze(self, symbol):
+            return {"symbol": symbol, "action": "HOLD"}
+
+    monkeypatch.setattr("crypto_desk.cli._service", lambda settings, **kwargs: FakeService())
+
+    result = CliRunner().invoke(app, ["--config", str(config), "--json", "analyze", "BTCUSDT"])
+
+    assert result.exit_code == 0
+    assert len(calls) == 1
+
+
+def test_dashboard_hook_fires_after_daily_only_when_completed(tmp_path: Path, monkeypatch):
+    config = _write_config(tmp_path)
+
+    for status, expected_calls in (("COMPLETED", 1), ("ALREADY_DONE", 0), ("NOT_DUE", 0)):
+        calls = _install_publish_hook_spy(monkeypatch)
+
+        class FakeService:
+            def daily(self, *, due=False, catch_up=False):
+                return {"status": status, "bucket": "2026-07-18"}
+
+        monkeypatch.setattr("crypto_desk.cli._service", lambda settings, **kwargs: FakeService())
+
+        result = CliRunner().invoke(app, ["--config", str(config), "--json", "daily"])
+
+        assert result.exit_code == 0
+        assert len(calls) == expected_calls, status
+
+
+def test_dashboard_hook_fires_after_health_only_when_completed(tmp_path: Path, monkeypatch):
+    config = _write_config(tmp_path)
+
+    for status, expected_calls in (("COMPLETED", 1), ("ALREADY_DONE", 0)):
+        calls = _install_publish_hook_spy(monkeypatch)
+
+        class FakeService:
+            def health(self, *, due=False):
+                return {"status": status, "alerts": []}
+
+        monkeypatch.setattr("crypto_desk.cli._service", lambda settings, **kwargs: FakeService())
+
+        result = CliRunner().invoke(app, ["--config", str(config), "--json", "health"])
+
+        assert result.exit_code == 0
+        assert len(calls) == expected_calls, status
+
+
+def test_dashboard_hook_fires_after_approve(tmp_path: Path, monkeypatch):
+    config = _write_config(tmp_path)
+    calls = _install_publish_hook_spy(monkeypatch)
+
+    class FakeExecution:
+        def approve(self, ticket_id: str, **kwargs):
+            return {"ticket_id": ticket_id, "status": "APPROVED"}
+
+    monkeypatch.setattr("crypto_desk.cli._execution_service", lambda settings: FakeExecution())
+
+    result = CliRunner().invoke(app, ["--config", str(config), "--json", "approve", "ticket-1"])
+
+    assert result.exit_code == 0
+    assert len(calls) == 1
+
+
+def test_dashboard_hook_fires_after_reject(tmp_path: Path, monkeypatch):
+    config = _write_config(tmp_path)
+    calls = _install_publish_hook_spy(monkeypatch)
+
+    class FakeExecution:
+        def reject(self, ticket_id: str, **kwargs):
+            return {"ticket_id": ticket_id, "status": "REJECTED"}
+
+    monkeypatch.setattr("crypto_desk.cli._execution_service", lambda settings: FakeExecution())
+
+    result = CliRunner().invoke(app, ["--config", str(config), "--json", "reject", "ticket-1"])
+
+    assert result.exit_code == 0
+    assert len(calls) == 1
+
+
+def test_dashboard_hook_fires_after_orders_reconcile_only_when_results_present(
+    tmp_path: Path, monkeypatch
+):
+    config = _write_config(tmp_path)
+    store = Store(tmp_path / "crypto.sqlite3")
+    store.save_submission(
+        "open-ticket", "testnet", "cdt-open-ticket", {"status": "RECONCILE_REQUIRED"}
+    )
+    store.close()
+    calls = _install_publish_hook_spy(monkeypatch)
+
+    class FakeExecution:
+        def reconcile(self, ticket_id: str):
+            return {"ticket_id": ticket_id, "status": "SUBMITTED"}
+
+    monkeypatch.setattr("crypto_desk.cli._execution_service", lambda settings: FakeExecution())
+
+    result = CliRunner().invoke(app, ["--config", str(config), "--json", "orders", "--reconcile"])
+
+    assert result.exit_code == 0
+    assert len(calls) == 1
+
+
+def test_dashboard_hook_does_not_fire_after_orders_reconcile_with_no_results(
+    tmp_path: Path, monkeypatch
+):
+    config = _write_config(tmp_path)
+    store = Store(tmp_path / "crypto.sqlite3")
+    store.close()
+    calls = _install_publish_hook_spy(monkeypatch)
+
+    result = CliRunner().invoke(app, ["--config", str(config), "--json", "orders", "--reconcile"])
+
+    assert result.exit_code == 0
+    assert len(calls) == 0
+
+
+def test_dashboard_hook_does_not_fire_after_readonly_doctor(tmp_path: Path, monkeypatch):
+    config = _write_config(tmp_path)
+    calls = _install_publish_hook_spy(monkeypatch)
+
+    result = CliRunner().invoke(app, ["--config", str(config), "--json", "doctor"])
+
+    assert result.exit_code == 0
+    assert len(calls) == 0

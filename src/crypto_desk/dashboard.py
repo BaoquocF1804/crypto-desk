@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
+import os
 from datetime import datetime
 from decimal import Decimal
 from typing import Callable, Literal, NamedTuple
 
+import httpx
 from pydantic import BaseModel, ConfigDict
 
 from .config import Settings
@@ -14,6 +17,11 @@ from .store import TERMINAL_CHAIN_STATES, Store
 HEALTH_STALE_SECONDS = 20 * 60
 HEALTH_OFFLINE_SECONDS = 60 * 60
 ACTIONABLE_TICKET_STATUSES = frozenset({"PENDING"})
+
+DASHBOARD_INGEST_URL_ENV = "CRYPTO_DESK_DASHBOARD_INGEST_URL"
+DASHBOARD_INGEST_TOKEN_ENV = "CRYPTO_DESK_DASHBOARD_INGEST_TOKEN"
+SITES_BYPASS_TOKEN_ENV = "CRYPTO_DESK_SITES_BYPASS_TOKEN"
+_MAX_PUBLISH_PAYLOAD_BYTES = 64 * 1024
 
 HealthState = Literal["online", "degraded", "offline"]
 AttemptState = Literal["valid", "blocked"]
@@ -343,4 +351,85 @@ def build_dashboard_snapshot(
         portfolio=portfolio,
         symbols=symbols,
         operations=operations,
+    )
+
+
+class DashboardPublishError(RuntimeError):
+    """Raised when a dashboard snapshot could not be published.
+
+    The message is always safe to display/log: it never contains header
+    values, tokens, or the remote response body.
+    """
+
+
+def publish_dashboard(
+    snapshot: DashboardSnapshot,
+    *,
+    url: str,
+    ingest_token: str,
+    sites_bypass_token: str,
+    client: httpx.Client | None = None,
+) -> None:
+    body = json.dumps(
+        snapshot.model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(body) > _MAX_PUBLISH_PAYLOAD_BYTES:
+        raise DashboardPublishError("dashboard payload exceeds the 64 KiB publish limit")
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {ingest_token}",
+        "OAI-Sites-Authorization": f"Bearer {sites_bypass_token}",
+    }
+    owns_client = client is None
+    active = client if client is not None else httpx.Client(timeout=10)
+    try:
+        response = active.post(
+            url,
+            content=body,
+            headers=headers,
+            timeout=10,
+            follow_redirects=False,
+        )
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        category = "authentication failed" if status in (401, 403) else "request failed"
+        raise DashboardPublishError(f"dashboard ingest {category} (status {status})") from None
+    except httpx.HTTPError as exc:
+        raise DashboardPublishError(
+            f"dashboard ingest request failed ({type(exc).__name__})"
+        ) from None
+    finally:
+        if owns_client:
+            active.close()
+
+
+def publish_dashboard_from_env(snapshot: DashboardSnapshot, *, strict: bool) -> None:
+    url = os.environ.get(DASHBOARD_INGEST_URL_ENV)
+    ingest_token = os.environ.get(DASHBOARD_INGEST_TOKEN_ENV)
+    sites_bypass_token = os.environ.get(SITES_BYPASS_TOKEN_ENV)
+    missing = [
+        name
+        for name, value in (
+            (DASHBOARD_INGEST_URL_ENV, url),
+            (DASHBOARD_INGEST_TOKEN_ENV, ingest_token),
+            (SITES_BYPASS_TOKEN_ENV, sites_bypass_token),
+        )
+        if not value
+    ]
+    if missing:
+        if strict:
+            raise DashboardPublishError(
+                f"missing required env vars for dashboard publish: {', '.join(missing)}"
+            )
+        return
+
+    publish_dashboard(
+        snapshot,
+        url=url,
+        ingest_token=ingest_token,
+        sites_bypass_token=sites_bypass_token,
     )

@@ -18,6 +18,12 @@ from pydantic import BaseModel
 from .broker import BinanceSpotBroker
 from .committee import CryptoCommittee, OpenAIStructuredClient
 from .config import MAINNET_GRADUATION_CHAINS, Settings, load_settings
+from .dashboard import (
+    DASHBOARD_INGEST_URL_ENV,
+    DashboardPublishError,
+    build_dashboard_snapshot,
+    publish_dashboard_from_env,
+)
 from .data import EvidenceBuilder, PublicDataClient
 from .domain import to_jsonable
 from .execution import ExecutionService, confirmation_code, telegram_approval_proof
@@ -67,7 +73,9 @@ def doctor(
 def sync(ctx: typer.Context) -> None:
     settings = _load(ctx)
     service = _service(settings, broker=True)
-    _emit(ctx, service.sync())
+    result = service.sync()
+    _publish_dashboard_if_configured(settings)
+    _emit(ctx, result)
 
 
 @app.command()
@@ -84,7 +92,9 @@ def analyze(ctx: typer.Context, symbol: str) -> None:
     if normalized not in settings.symbols:
         _fail("Symbol is outside the configured allowlist")
     service = _service(settings)
-    _emit(ctx, service.analyze(normalized))
+    result = service.analyze(normalized)
+    _publish_dashboard_if_configured(settings)
+    _emit(ctx, result)
 
 
 @app.command()
@@ -94,10 +104,10 @@ def daily(
     catch_up: Annotated[bool, typer.Option("--catch-up")] = False,
 ) -> None:
     settings = _load(ctx)
-    _emit(
-        ctx,
-        _service(settings).daily(due=due, catch_up=catch_up),
-    )
+    result = _service(settings).daily(due=due, catch_up=catch_up)
+    if result.get("status") == "COMPLETED":
+        _publish_dashboard_if_configured(settings)
+    _emit(ctx, result)
 
 
 @app.command()
@@ -107,7 +117,10 @@ def health(
 ) -> None:
     settings = _load(ctx)
     service = _service(settings, broker=True, execution=True)
-    _emit(ctx, service.health(due=due))
+    result = service.health(due=due)
+    if result.get("status") == "COMPLETED":
+        _publish_dashboard_if_configured(settings)
+    _emit(ctx, result)
 
 
 @app.command()
@@ -152,6 +165,7 @@ def approve(
         )
     except ValueError as exc:
         _fail(str(exc))
+    _publish_dashboard_if_configured(settings)
     _emit(ctx, result)
 
 
@@ -172,6 +186,7 @@ def reject(
         )
     except ValueError as exc:
         _fail(str(exc))
+    _publish_dashboard_if_configured(settings)
     _emit(ctx, result)
 
 
@@ -210,6 +225,8 @@ def orders(
     refreshed = Store(settings.database)
     current = refreshed.list_submissions()
     refreshed.close()
+    if results:
+        _publish_dashboard_if_configured(settings)
     _emit(
         ctx,
         {
@@ -244,6 +261,20 @@ def reflections(
         ctx,
         Store(settings.database).list_reflections(normalized),
     )
+
+
+@app.command("publish-dashboard")
+def publish_dashboard_command(ctx: typer.Context) -> None:
+    settings = _load(ctx)
+    store = Store(settings.database)
+    try:
+        snapshot = build_dashboard_snapshot(settings, store)
+        publish_dashboard_from_env(snapshot, strict=True)
+    except DashboardPublishError as exc:
+        _fail(str(exc))
+    finally:
+        store.close()
+    _emit(ctx, {"status": "PUBLISHED", "generated_at": snapshot.generated_at})
 
 
 def doctor_report(
@@ -452,6 +483,19 @@ def _load(ctx: typer.Context) -> Settings:
         return load_settings(Path(ctx.obj["config"]))
     except (OSError, ValueError) as exc:
         _fail(str(exc))
+
+
+def _publish_dashboard_if_configured(settings: Settings) -> None:
+    if not os.getenv(DASHBOARD_INGEST_URL_ENV):
+        return
+    store = Store(settings.database)
+    try:
+        snapshot = build_dashboard_snapshot(settings, store)
+        publish_dashboard_from_env(snapshot, strict=False)
+    except Exception as exc:
+        typer.echo(f"Warning: dashboard publish failed ({type(exc).__name__})", err=True)
+    finally:
+        store.close()
 
 
 def _emit(ctx: typer.Context, payload: Any) -> None:

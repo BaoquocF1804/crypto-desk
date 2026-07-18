@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import httpx
+import pytest
+
 from crypto_desk.config import Settings
-from crypto_desk.dashboard import build_dashboard_snapshot
+from crypto_desk.dashboard import (
+    DashboardPublishError,
+    build_dashboard_snapshot,
+    publish_dashboard,
+    publish_dashboard_from_env,
+)
 from crypto_desk.domain import PortfolioSnapshot, ResearchDecision, iso
 from crypto_desk.store import Store
 
@@ -327,3 +336,166 @@ def test_operations_counts_tickets_and_orders(tmp_path: Path):
     assert len(snapshot.operations.recent_events) == 1
     assert snapshot.operations.recent_events[0].kind == "order"
     assert snapshot.operations.recent_events[0].summary == "Order filled"
+
+
+DASHBOARD_URL = "https://dashboard.example/api/ingest"
+
+
+def make_dashboard_snapshot(tmp_path: Path) -> Any:
+    store = Store(tmp_path / "crypto.db")
+    settings = make_settings()
+    snapshot = build_dashboard_snapshot(settings, store)
+    store.close()
+    return snapshot
+
+
+class _HugeSnapshotStub:
+    def model_dump(self, mode: str) -> dict[str, Any]:
+        return {"padding": "x" * (70 * 1024)}
+
+
+@pytest.mark.parametrize("status", [200, 204])
+def test_publish_dashboard_succeeds_on_2xx(tmp_path: Path, status: int):
+    snapshot = make_dashboard_snapshot(tmp_path)
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        captured["headers"] = request.headers
+        captured["body"] = request.content
+        return httpx.Response(status)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    publish_dashboard(
+        snapshot,
+        url=DASHBOARD_URL,
+        ingest_token="ingest-secret",
+        sites_bypass_token="bypass-secret",
+        client=client,
+    )
+
+    assert captured["method"] == "POST"
+    assert captured["url"] == DASHBOARD_URL
+    assert captured["headers"]["Content-Type"] == "application/json"
+    assert captured["headers"]["Authorization"] == "Bearer ingest-secret"
+    assert captured["headers"]["OAI-Sites-Authorization"] == "Bearer bypass-secret"
+    assert json.loads(captured["body"])["schema_version"] == 1
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_publish_dashboard_authentication_failure_never_logs_tokens(tmp_path: Path, status: int):
+    snapshot = make_dashboard_snapshot(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, text="remote debug body must never surface")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    with pytest.raises(DashboardPublishError) as exc_info:
+        publish_dashboard(
+            snapshot,
+            url=DASHBOARD_URL,
+            ingest_token="ingest-secret",
+            sites_bypass_token="bypass-secret",
+            client=client,
+        )
+
+    message = str(exc_info.value)
+    assert "ingest-secret" not in message
+    assert "bypass-secret" not in message
+    assert "remote debug body" not in message
+    assert str(status) in message
+
+
+def test_publish_dashboard_network_error_never_leaks_url_query_or_secrets(tmp_path: Path):
+    snapshot = make_dashboard_snapshot(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("connect timed out")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    with pytest.raises(DashboardPublishError) as exc_info:
+        publish_dashboard(
+            snapshot,
+            url=f"{DASHBOARD_URL}?token=leaked-secret",
+            ingest_token="ingest-secret",
+            sites_bypass_token="bypass-secret",
+            client=client,
+        )
+
+    message = str(exc_info.value)
+    assert "leaked-secret" not in message
+    assert "ingest-secret" not in message
+    assert "bypass-secret" not in message
+    assert "dashboard.example" not in message
+
+
+def test_publish_dashboard_blocks_oversized_payload_before_request():
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        return httpx.Response(200)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    with pytest.raises(DashboardPublishError):
+        publish_dashboard(
+            _HugeSnapshotStub(),
+            url=DASHBOARD_URL,
+            ingest_token="ingest-secret",
+            sites_bypass_token="bypass-secret",
+            client=client,
+        )
+
+    assert calls["count"] == 0
+
+
+def test_publish_dashboard_from_env_raises_clearly_when_a_var_is_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    snapshot = make_dashboard_snapshot(tmp_path)
+    monkeypatch.delenv("CRYPTO_DESK_DASHBOARD_INGEST_URL", raising=False)
+    monkeypatch.delenv("CRYPTO_DESK_DASHBOARD_INGEST_TOKEN", raising=False)
+    monkeypatch.delenv("CRYPTO_DESK_SITES_BYPASS_TOKEN", raising=False)
+
+    with pytest.raises(DashboardPublishError) as exc_info:
+        publish_dashboard_from_env(snapshot, strict=True)
+
+    assert "CRYPTO_DESK_DASHBOARD_INGEST_URL" in str(exc_info.value)
+
+
+def test_publish_dashboard_from_env_is_noop_when_not_strict_and_unconfigured(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    snapshot = make_dashboard_snapshot(tmp_path)
+    monkeypatch.delenv("CRYPTO_DESK_DASHBOARD_INGEST_URL", raising=False)
+
+    publish_dashboard_from_env(snapshot, strict=False)
+
+
+def test_publish_dashboard_from_env_sends_request_with_configured_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    snapshot = make_dashboard_snapshot(tmp_path)
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["headers"] = request.headers
+        return httpx.Response(200)
+
+    monkeypatch.setenv("CRYPTO_DESK_DASHBOARD_INGEST_URL", DASHBOARD_URL)
+    monkeypatch.setenv("CRYPTO_DESK_DASHBOARD_INGEST_TOKEN", "ingest-secret")
+    monkeypatch.setenv("CRYPTO_DESK_SITES_BYPASS_TOKEN", "bypass-secret")
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        "crypto_desk.dashboard.httpx.Client",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(handler)),
+    )
+
+    publish_dashboard_from_env(snapshot, strict=True)
+
+    assert captured["headers"]["Authorization"] == "Bearer ingest-secret"
