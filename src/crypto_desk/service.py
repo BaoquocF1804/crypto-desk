@@ -345,7 +345,7 @@ class CryptoDeskService:
         builder = self._require_builder()
         completed_before = iso(self._aware(cutoff) - timedelta(days=REFLECTION_HORIZON_DAYS))
         saved: list[str] = []
-        for run in self.store.unreflected_runs(completed_before):
+        for run in self.store.unreflected_runs(completed_before, tuple(self.settings.symbols)):
             if not run["decision"].get("evidence_ids"):
                 continue
             try:

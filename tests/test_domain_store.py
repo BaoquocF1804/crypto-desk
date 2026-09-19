@@ -326,3 +326,45 @@ def test_recent_order_events_are_scoped_to_environment(tmp_path: Path):
 
     assert [event["ticket_id"] for event in testnet_events] == ["ticket-testnet"]
     assert [event["ticket_id"] for event in mainnet_events] == ["ticket-mainnet"]
+
+
+def test_unreflected_runs_filters_by_symbol(tmp_path: Path):
+    from crypto_desk.store import Store
+
+    store = Store(tmp_path / "t.sqlite3")
+    try:
+        for run_id, symbol in (("r-btc", "BTCUSDT"), ("r-fpt", "FPT")):
+            store.db.execute(
+                "INSERT INTO research_runs(id,symbol,cutoff,decision,report_dir)"
+                " VALUES (?,?,?,?,?)",
+                (run_id, symbol, "2026-01-01T00:00:00+00:00", "{}", "/tmp"),
+            )
+        store.db.commit()
+
+        both = store.unreflected_runs("2026-02-01T00:00:00+00:00")
+        crypto = store.unreflected_runs("2026-02-01T00:00:00+00:00", ("BTCUSDT",))
+        vn = store.unreflected_runs("2026-02-01T00:00:00+00:00", ("FPT",))
+    finally:
+        store.close()
+
+    assert {r["symbol"] for r in both} == {"BTCUSDT", "FPT"}
+    assert [r["symbol"] for r in crypto] == ["BTCUSDT"]
+    assert [r["symbol"] for r in vn] == ["FPT"]
+
+
+def test_unreflected_runs_with_empty_symbol_tuple_returns_nothing(tmp_path: Path):
+    from crypto_desk.store import Store
+
+    store = Store(tmp_path / "t.sqlite3")
+    try:
+        store.db.execute(
+            "INSERT INTO research_runs(id,symbol,cutoff,decision,report_dir)"
+            " VALUES (?,?,?,?,?)",
+            ("r-btc", "BTCUSDT", "2026-01-01T00:00:00+00:00", "{}", "/tmp"),
+        )
+        store.db.commit()
+        rows = store.unreflected_runs("2026-02-01T00:00:00+00:00", ())
+    finally:
+        store.close()
+
+    assert rows == []

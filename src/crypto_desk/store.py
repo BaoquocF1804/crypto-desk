@@ -236,16 +236,35 @@ class Store:
                 }
         return None
 
-    def unreflected_runs(self, completed_before: str) -> list[dict[str, Any]]:
+    def unreflected_runs(
+        self,
+        completed_before: str,
+        symbols: tuple[str, ...] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Run chưa có reflection, tuỳ chọn giới hạn trong một tập symbol.
+
+        Bảng ``research_runs`` dùng chung cho mọi asset class, nên job chấm điểm
+        của một đường phải nói rõ nó nhận symbol nào; nếu không nó sẽ vớ phải
+        run của đường khác, ném lỗi trên một khoá evidence không tồn tại, và vì
+        lỗi bị nuốt nên run đó kẹt lại "chưa reflect" vĩnh viễn, chiếm suất
+        trong ``LIMIT 100`` ở mọi lần chạy sau.
+        """
+        if symbols is not None and not symbols:
+            return []
+        params: list[Any] = [completed_before]
+        clause = ""
+        if symbols is not None:
+            clause = f" AND r.symbol IN ({','.join('?' * len(symbols))})"
+            params.extend(symbols)
         rows = self.db.execute(
-            """
+            f"""
             SELECT r.* FROM research_runs AS r
             LEFT JOIN reflections AS f ON f.run_id = r.id
-            WHERE f.run_id IS NULL AND r.cutoff <= ?
+            WHERE f.run_id IS NULL AND r.cutoff <= ?{clause}
             ORDER BY r.cutoff
             LIMIT 100
             """,
-            (completed_before,),
+            params,
         ).fetchall()
         return [
             {
