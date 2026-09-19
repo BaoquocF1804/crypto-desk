@@ -1360,3 +1360,28 @@ def test_latest_valid_run_respects_before_cutoff(tmp_path: Path):
     # Before t1, there is no prior run
     latest_before_t1 = store.latest_valid_run("BTCUSDT", before_cutoff=t1.isoformat())
     assert latest_before_t1 is None
+
+
+def test_scorecard_command_renders_table(tmp_path: Path):
+    config = _write_config(tmp_path)
+    store = Store(make_settings(tmp_path).database)
+    store.save_reflection(
+        "run-1",
+        "ETHUSDT",
+        {
+            "realized_return": "0.05",
+            "maximum_adverse_excursion": "-0.02",
+            "maximum_favorable_excursion": "0.08",
+            "benchmark_return": "0.01",
+            "alpha": "0.04",
+            "decision_action": "ACCUMULATE",
+        },
+    )
+    store.close()
+
+    result = CliRunner().invoke(app, ["--config", str(config), "scorecard"])
+
+    assert result.exit_code == 0
+    assert "20 ngày" in result.stdout
+    assert "ACCUMULATE" in result.stdout
+    assert "+4.00%" in result.stdout

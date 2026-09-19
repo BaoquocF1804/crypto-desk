@@ -45,6 +45,7 @@ from .runner import (
     CommandRunner,
     RunnerProtocolError,
 )
+from .scorecard import Scorecard, build_scorecard
 from .service import AnalysisRun, CryptoDeskService
 from .store import Store
 
@@ -279,6 +280,21 @@ def reflections(
         ctx,
         Store(settings.database).list_reflections(normalized),
     )
+
+
+@app.command()
+def scorecard(
+    ctx: typer.Context,
+    symbol: str | None = None,
+) -> None:
+    settings = _load(ctx)
+    normalized = symbol.upper() if symbol else None
+    store = Store(settings.database)
+    try:
+        card = build_scorecard(store.list_reflections(normalized))
+    finally:
+        store.close()
+    _emit(ctx, card)
 
 
 @app.command("publish-dashboard")
@@ -623,7 +639,9 @@ def _emit(ctx: typer.Context, payload: Any) -> None:
             )
         )
         return
-    if isinstance(payload, AnalysisRun):
+    if isinstance(payload, Scorecard):
+        typer.echo(payload.render())
+    elif isinstance(payload, AnalysisRun):
         msg = f"# {payload.decision.symbol}: {payload.decision.action}\n"
         if payload.decision.futures_bias:
             msg += f"- Futures Bias: {payload.decision.futures_bias}\n"

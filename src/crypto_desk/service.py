@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from pydantic import BaseModel
 
-from .config import Settings
+from .config import BENCHMARK_SYMBOL, REFLECTION_HORIZON_DAYS, Settings
 from .data import EvidenceBuilder, EvidenceError, EvidenceSnapshot
 from .domain import (
     PortfolioSnapshot,
@@ -314,8 +314,10 @@ class CryptoDeskService:
         benchmark_closes: tuple[Decimal, ...],
         decision_action: str | None = None,
     ) -> dict[str, Any]:
-        if len(closes) < 20:
-            raise ValueError("Reflection requires 20 completed daily periods")
+        if len(closes) < REFLECTION_HORIZON_DAYS:
+            raise ValueError(
+                f"Reflection requires {REFLECTION_HORIZON_DAYS} completed daily periods"
+            )
         payload: dict[str, Any] = calculate_reflection(
             entry=entry,
             closes=closes,
@@ -333,7 +335,7 @@ class CryptoDeskService:
 
     def refresh_reflections(self, cutoff: datetime) -> list[str]:
         builder = self._require_builder()
-        completed_before = iso(self._aware(cutoff) - timedelta(days=20))
+        completed_before = iso(self._aware(cutoff) - timedelta(days=REFLECTION_HORIZON_DAYS))
         saved: list[str] = []
         for run in self.store.unreflected_runs(completed_before):
             if not run["decision"].get("evidence_ids"):
@@ -353,8 +355,8 @@ class CryptoDeskService:
                 closes = builder.reflection_closes(run["symbol"], start)
                 benchmark = (
                     ()
-                    if run["symbol"] == "BTCUSDT"
-                    else builder.reflection_closes("BTCUSDT", start)
+                    if run["symbol"] == BENCHMARK_SYMBOL
+                    else builder.reflection_closes(BENCHMARK_SYMBOL, start)
                 )
                 self.save_reflection(
                     run_id=run["id"],

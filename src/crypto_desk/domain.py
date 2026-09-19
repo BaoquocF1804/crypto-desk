@@ -37,6 +37,11 @@ def to_jsonable(value: Any) -> Any:
     return value
 
 
+def format_pct(value: Any) -> str:
+    """Tỉ lệ thập phân thành phần trăm có dấu, ví dụ Decimal('0.0312') -> '+3.12%'."""
+    return f"{Decimal(str(value)) * 100:+.2f}%"
+
+
 @dataclass(frozen=True, slots=True)
 class SymbolRules:
     symbol: str
