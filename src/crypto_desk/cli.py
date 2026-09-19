@@ -7,6 +7,7 @@ import platform
 import signal
 import shutil
 import sqlite3
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -365,6 +366,7 @@ def doctor_report(
 ) -> dict[str, Any]:
     environment = settings.binance.environment
     prefix = environment.upper()
+    provider_target = resolve_provider(settings)
     packages = {}
     for package in (
         "crypto-desk",
@@ -397,6 +399,7 @@ def doctor_report(
         },
         "llm": {
             "provider": settings.models.provider,
+            "backend": provider_target.backend,
             "quick_model": settings.models.quick,
             "deep_model": settings.models.deep,
             "quick_thinking": settings.models.quick_thinking,
@@ -432,6 +435,9 @@ def doctor_report(
             "installed": _hermes_installed(),
         },
     }
+    if provider_target.backend == "vertex":
+        report["llm"]["project"] = provider_target.project
+        report["llm"]["location"] = provider_target.location
     if online:
         report["online"] = _online_doctor(settings)
     return report
@@ -492,7 +498,7 @@ def _online_doctor(settings: Settings) -> dict[str, Any]:
                 )
         results["rss"] = rss_results
 
-    provider_result = f"{settings.models.provider}_structured_output"
+    provider_result = f"{resolve_provider(settings).backend}_structured_output"
     try:
         response = _structured_client(settings).generate(
             stage="doctor",
@@ -552,21 +558,52 @@ def _service(
     )
 
 
-def _structured_client(settings: Settings) -> StructuredClient:
+@dataclass(frozen=True, slots=True)
+class ProviderTarget:
+    """Backend sẽ thực sự phục vụ request, không phải nhãn trong config.
+
+    ``models.provider: gemini`` không có nghĩa là gọi Gemini API: chỉ cần
+    ``GOOGLE_APPLICATION_CREDENTIALS`` hoặc ``GOOGLE_CLOUD_PROJECT`` có mặt là
+    request đi qua Vertex AI và ``GEMINI_API_KEY`` bị bỏ qua hoàn toàn. Đó là
+    thứ ``desk doctor`` phải nói ra được, nên phép chọn backend sống ở một chỗ
+    duy nhất mà cả factory lẫn doctor cùng đọc — vá riêng cho doctor thì hai
+    bên sẽ lệch nhau ngay lần sửa sau.
+    """
+
+    backend: Literal["vertex", "gemini_api", "openai"]
+    project: str | None = None
+    location: str | None = None
+
+
+def resolve_provider(settings: Settings) -> ProviderTarget:
+    """Backend nào sẽ phục vụ request, theo config cộng biến môi trường."""
     if settings.models.provider in {"gemini", "vertexai"}:
         credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
         project = os.getenv("GOOGLE_CLOUD_PROJECT")
-        location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
         if credentials_path or project or settings.models.provider == "vertexai":
+            return ProviderTarget(
+                backend="vertex",
+                project=project,
+                location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1"),
+            )
+        return ProviderTarget(backend="gemini_api")
+    return ProviderTarget(backend="openai")
+
+
+def _structured_client(settings: Settings) -> StructuredClient:
+    target = resolve_provider(settings)
+    if target.backend in {"vertex", "gemini_api"}:
+        if target.backend == "vertex":
+            credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
             if credentials_path and not os.path.isabs(credentials_path):
                 resolved = Path(credentials_path).resolve()
                 if resolved.exists():
                     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(resolved)
             kwargs: dict[str, Any] = {"vertexai": True}
-            if project:
-                kwargs["project"] = project
-            if location:
-                kwargs["location"] = location
+            if target.project:
+                kwargs["project"] = target.project
+            if target.location:
+                kwargs["location"] = target.location
             return GeminiStructuredClient(
                 genai.Client(**kwargs),
                 min_interval_seconds=float(os.getenv("GEMINI_MIN_REQUEST_INTERVAL_SECONDS", "6")),

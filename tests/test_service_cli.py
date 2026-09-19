@@ -1525,3 +1525,84 @@ def test_render_reflection_handles_legacy_row_without_decision_action():
     )
 
     assert "KHÔNG RÕ" in line
+
+
+def _clear_google_env(monkeypatch) -> None:
+    for name in (
+        "GEMINI_API_KEY",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_CLOUD_PROJECT",
+        "GOOGLE_CLOUD_LOCATION",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_resolve_provider_reports_vertex_even_when_config_says_gemini(monkeypatch):
+    """config.provider là nhãn, không phải backend. Một biến Google là đủ để đổi backend."""
+    from crypto_desk.cli import resolve_provider
+
+    _clear_google_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "irrelevant-when-vertex-wins")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj-abc")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "global")
+
+    target = resolve_provider(Settings(models=ModelSettings(provider="gemini")))
+
+    assert target.backend == "vertex"
+    assert target.project == "proj-abc"
+    assert target.location == "global"
+
+
+def test_resolve_provider_reports_gemini_api_when_no_google_project_or_credentials(monkeypatch):
+    from crypto_desk.cli import resolve_provider
+
+    _clear_google_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "some-key")
+
+    target = resolve_provider(Settings(models=ModelSettings(provider="gemini")))
+
+    assert target.backend == "gemini_api"
+    assert target.project is None
+    assert target.location is None
+
+
+def test_resolve_provider_reports_openai(monkeypatch):
+    from crypto_desk.cli import resolve_provider
+
+    _clear_google_env(monkeypatch)
+
+    target = resolve_provider(Settings(models=ModelSettings(provider="openai")))
+
+    assert target.backend == "openai"
+
+
+def test_doctor_names_the_backend_that_will_actually_serve_requests(tmp_path: Path, monkeypatch):
+    _clear_google_env(monkeypatch)
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj-abc")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "global")
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    try:
+        report = doctor_report(settings, store, online=False)
+    finally:
+        store.close()
+
+    assert report["llm"]["provider"] == "gemini"
+    assert report["llm"]["backend"] == "vertex"
+    assert report["llm"]["project"] == "proj-abc"
+    assert report["llm"]["location"] == "global"
+
+
+def test_doctor_omits_project_and_location_when_backend_is_not_vertex(tmp_path: Path, monkeypatch):
+    _clear_google_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "some-key")
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    try:
+        report = doctor_report(settings, store, online=False)
+    finally:
+        store.close()
+
+    assert report["llm"]["backend"] == "gemini_api"
+    assert "project" not in report["llm"]
+    assert "location" not in report["llm"]
