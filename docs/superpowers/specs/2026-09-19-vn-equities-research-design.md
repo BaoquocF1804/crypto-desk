@@ -112,6 +112,26 @@ Bắt buộc: ghi `benchmark_symbol` vào payload reflection, và scorecard **t�
 
 Hàng cũ không có `benchmark_symbol`: suy ra từ symbol (kết thúc bằng `USDT` → `BTCUSDT`), có ghi chú trong render rằng đây là suy luận.
 
+### 7. Reflection chỉ nhận quyết định thật của hội đồng
+
+Phát hiện ngày 2026-09-19 khi soi dữ liệu thật: **7 trong 9 reflection đang được scorecard chấm điểm là run hỏng**, không phải quyết định. Chúng chết vì `provider:rate_limit` và `provider:model_unavailable`, chưa từng tới được hội đồng.
+
+Nguyên nhân: `service._no_trade()` sinh ra một `ResearchDecision` trông y hệt quyết định thật, chỉ khác ở trường `reason`, mà `reason` không được đưa vào payload reflection. Bảng `reflections` vì thế không phân biệt được "hội đồng từ chối" với "chạy hỏng", và hàng `NO_TRADE` trên scorecard đang đo giá đi đâu sau khi Gemini chặn rate limit.
+
+Bắt buộc: **chỉ ghi reflection cho run mà hội đồng thật sự ra quyết định.** Ghi `decided: true` vào payload tại chỗ ra quyết định, và `refresh_reflections` bỏ qua mọi run không có nó. Hàng cũ không có trường này: suy ra từ `reason` (`"committee decision"` hoặc `"Quyết định của hội đồng."` là thật, còn lại là hỏng).
+
+Bất biến này quan trọng với VN hơn với crypto, vì bất biến 8 dưới đây khiến đường VN sinh ra nhiều `_no_trade` giả hơn.
+
+### 8. V1 của VN không có REDUCE và EXIT
+
+`_position_quantity()` đọc `store.latest_snapshot(binance.environment)` — ảnh chụp danh mục Binance. VN không có broker nên giá trị luôn là `0`. `_validate_manager` thì raise `REDUCE/EXIT requires an existing position` khi vị thế `<= 0`, structured output bị từ chối hai lần rồi rơi xuống `_no_trade`.
+
+Nếu để nguyên, mọi lần manager VN cho rằng nên giảm hoặc thoát hàng sẽ bị ghi lại thành `NO_TRADE` kèm lý do `manager structured output rejected` — một quyết định thật bị biến dạng thành lỗi kỹ thuật, đúng thứ bất biến 7 vừa cấm.
+
+Bắt buộc: **prompt manager VN chỉ đưa ra ba lựa chọn — ACCUMULATE, HOLD, NO_TRADE** — để model không bao giờ đề xuất thứ chắc chắn bị từ chối. Không đổi enum `Action` (dùng chung), chỉ thu hẹp trong prompt.
+
+Đây là giới hạn của V1, không phải thiết kế cuối. Gỡ nó cần một nguồn vị thế cho VN (người dùng tự khai danh mục), nằm ngoài phạm vi V1.
+
 ## Interface
 
 ### Snapshot
@@ -140,13 +160,16 @@ evidence_ids: tuple[str, ...]         # property
 specialists: tuple[str, ...] = SPECIALISTS
 role_prompts: dict[str, str] = ROLE_PROMPTS
 specialist_evidence: dict[str, tuple[str, tuple[str, ...]]] = SPECIALIST_EVIDENCE
+mid_label: str = "Binance mid"
 ```
 
 Trong `run()`:
 - `for role in SPECIALISTS` → `self.specialists`
-- `required_kinds = {"spot","news","derivatives","reference"}` hardcode → suy ra: `{kind for kind, _ in self.specialist_evidence.values()} | {"reference"}`. Với crypto kết quả y hệt tập hardcode hiện tại.
+- `required_kinds = {"spot","news","derivatives","reference"}` hardcode → suy ra: `{kind for kind, _ in self.specialist_evidence.values()} | {"reference"}`. Với crypto kết quả y hệt tập hardcode hiện tại (đã chạy thử xác nhận).
 - `snapshot.binance_mid` (3 chỗ) → `snapshot.mid`
 - `_system_prompt(role)` → đọc `self.role_prompts`
+
+`MAX_ENTRY_DEVIATION` giữ nguyên 2% cho cả hai đường — với cổ phiếu biên độ ±7% thì 2% quanh giá khớp gần nhất vẫn là ràng buộc hợp lý cho một mức entry. Chỉ thông báo lỗi phải sửa: nó đang ghi cứng `"entry price deviates more than 2% from Binance mid"`, sai chữ khi chạy trên HOSE. Dùng `self.mid_label` để dựng thông báo; VN truyền `"giá khớp SSI"`.
 
 `OUTPUT_CONTRACT` dùng chung, không đổi.
 
@@ -158,7 +181,27 @@ Trong `run()`:
 | `src/crypto_desk/vn_prompts.py` | `VN_SPECIALISTS`, `VN_ROLE_PROMPTS` (4 chuyên gia + bull/bear/manager bản VN), `VN_SPECIALIST_EVIDENCE` |
 | `src/crypto_desk/vn_service.py` | `VNDeskService.analyze(symbol, cutoff)` — dựng evidence, gọi committee, ghi `research_runs` + artifacts, `refresh_reflections` với benchmark VN30 |
 
-CLI: `desk vn-analyze SYMBOL`, `desk vn-daily`. Cùng khuôn `_emit` / `_load` / `Store` sẵn có.
+### Store — cần một bộ lọc, không dùng lại nguyên vẹn
+
+Bản trước của spec viết "dùng lại `Store` nguyên vẹn". Sai. `unreflected_runs` không có bộ lọc asset:
+
+```sql
+SELECT r.* FROM research_runs AS r
+LEFT JOIN reflections f ON f.run_id = r.id
+WHERE f.run_id IS NULL AND r.cutoff <= ?  LIMIT 100
+```
+
+Nên `refresh_reflections` của crypto sẽ vớ phải run FPT/MBB, đọc `evidence["binance_mid"]` — khoá không tồn tại trong evidence VN — ném `KeyError`, rơi thẳng vào `except (EvidenceError, OSError, ValueError, KeyError, TypeError): continue`. Hậu quả: run VN **không bao giờ được chấm**, lỗi bị nuốt không báo, và vì vẫn "chưa reflect" nên mỗi lần `desk daily` lại thử lại vĩnh viễn, dần chiếm hết suất `LIMIT 100` và đẩy run crypto ra khỏi lô.
+
+Sửa: `unreflected_runs(completed_before, symbols)` nhận thêm danh sách symbol và lọc `WHERE r.symbol IN (...)`. Crypto truyền `settings.symbols`, VN truyền `settings.vn_symbols`. Không đổi schema, không migration.
+
+### CLI
+
+`desk vn-analyze SYMBOL` — phân tích một mã, cutoff live.
+
+`desk vn-daily` — **V1 không có screener.** `screen()` của crypto đọc `snapshot.quote_volume` và `snapshot.spread` (hai trường `VNEvidenceSnapshot` không có) với ngưỡng hiệu chỉnh cho crypto. Xây screener VN là việc riêng, không thuộc V1. Nên `vn-daily` chạy `refresh_reflections` rồi phân tích **toàn bộ** `vn_symbols` không lọc, và đánh dấu bucket lịch `"vn_daily"` — tên khác `"daily"` để hai lịch không giẫm lên nhau.
+
+Cùng khuôn `_emit` / `_load` / `Store` sẵn có.
 
 ### Config
 
@@ -191,11 +234,15 @@ desk vn-analyze FPT
       technical / liquidity / news / flow → bull ⇄ bear ×2 → manager
   └ Store.save_run + artifacts (report.md, evidence.json, decision.json)
 
-desk vn-daily  (sau ≥20 phiên)
-  └ refresh_reflections: entry = closeRaw lúc quyết định
-                         closes  = 20 phiên điều chỉnh sau đó
-                         benchmark = VN30
-                         payload += benchmark_symbol, decision_cutoff, horizon_days
+desk vn-daily
+  ├ refresh_reflections(symbols=vn_symbols)   ← chỉ quét run VN
+  │    bỏ qua run không phải quyết định hội đồng (bất biến 7)
+  │    entry     = closeRaw lúc quyết định
+  │    closes    = 20 phiên điều chỉnh sau đó
+  │    benchmark = VN30
+  │    payload  += decided, benchmark_symbol, decision_cutoff, horizon_days
+  ├ phân tích toàn bộ vn_symbols, không lọc (V1 không có screener)
+  └ mark_scheduled("vn_daily", bucket)        ← khác "daily" của crypto
 ```
 
 ## Xử lý lỗi
@@ -211,6 +258,8 @@ Theo đúng nguyên tắc sẵn có của desk: **thà không ra gì còn hơn r
 | Tất cả RSS feed hỏng | `EvidenceError` — cùng cách desk crypto xử `news_feeds` rỗng |
 | Chuỗi giá < số phiên cần | `EvidenceError`, không suy đoán bù |
 
+Mọi dòng trên đều kết thúc bằng `NO_TRADE` được ghi vào `research_runs` — nhưng **không dòng nào trong số đó được sinh reflection** (bất biến 7). Chỉ run mang `decided: true` mới vào bảng chấm điểm. Đọc bảng này mà quên điều đó là tái tạo đúng lỗi đang có trong dữ liệu hôm nay.
+
 ## Test
 
 Bắt buộc, ngoài test đơn vị thông thường:
@@ -221,8 +270,15 @@ Bắt buộc, ngoài test đơn vị thông thường:
 4. **Scorecard tách benchmark** — trộn hàng BTCUSDT-benchmark và VN30-benchmark, khẳng định chúng không gộp vào cùng một trung bình.
 5. **Hàng reflection cũ không có `benchmark_symbol`** — suy ra đúng và render có ghi chú là suy luận.
 6. **Crypto không đổi hành vi** — committee dựng không truyền tham số mới phải cho kết quả y hệt trước.
+7. **Run hỏng không sinh reflection** — dựng một run có `reason="provider:rate_limit"` và khẳng định `refresh_reflections` bỏ qua nó; một run có `reason="Quyết định của hội đồng."` thì nhận. Bảo vệ bất biến 7.
+8. **Hàng reflection cũ không có `decided`** — suy ra từ `reason` đúng theo cả hai định dạng: `"committee decision"` (bản tiếng Anh cũ) và `"Quyết định của hội đồng."`.
+9. **`unreflected_runs` lọc theo symbol** — trộn run `BTCUSDT` và `FPT` trong cùng bảng, khẳng định truy vấn với `settings.symbols` không trả về `FPT` và ngược lại. Bảo vệ khỏi lỗi nuốt im lặng.
+10. **Prompt manager VN không mời REDUCE/EXIT** — khẳng định chuỗi prompt chỉ liệt kê ACCUMULATE, HOLD, NO_TRADE. Bảo vệ bất biến 8.
 
 ## Không làm ở V1
+
+- **REDUCE và EXIT trên đường VN** (bất biến 8). Không có nguồn vị thế cho cổ phiếu nên hai action này luôn bị `_validate_manager` từ chối; prompt VN vì thế không mời chúng. Gỡ được khi có chỗ để người dùng khai danh mục VN.
+- **Screener cho VN.** `screen()` hiện tại đọc `quote_volume` và `spread` với ngưỡng crypto. `vn-daily` chạy thẳng cả `vn_symbols` không lọc.
 
 - Đặt lệnh, sinh phiếu lệnh, sizing theo VND. Không đụng `risk.py` / `execution.py` / `broker.py`.
 - Sổ lệnh mức 1-10 (SSI iboard không cho công khai). Chuyên gia liquidity làm việc với khối lượng khớp và số lệnh.
