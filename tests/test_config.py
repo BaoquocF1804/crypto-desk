@@ -197,3 +197,37 @@ def test_symbol_rules_require_usdt_quote():
             min_qty=Decimal("0.0001"),
             min_notional=Decimal("0.0001"),
         )
+
+
+def test_vn_symbols_do_not_go_through_the_usdt_validation(tmp_path):
+    from crypto_desk.config import load_settings
+
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "database: db.sqlite3\n"
+        "symbols: [BTCUSDT]\n"
+        "coingecko_ids: {BTCUSDT: bitcoin}\n"
+        "vn_symbols: [FPT, MBB]\n",
+        encoding="utf-8",
+    )
+
+    settings = load_settings(config)
+
+    assert settings.vn_symbols == ("FPT", "MBB")
+
+
+def test_vn_symbol_outside_the_v1_allowlist_is_rejected(tmp_path):
+    from crypto_desk.config import load_settings
+
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "database: db.sqlite3\n"
+        "symbols: [BTCUSDT]\n"
+        "coingecko_ids: {BTCUSDT: bitcoin}\n"
+        "vn_symbols: [FPT, VIC]\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="VN"):
+        load_settings(config)
+

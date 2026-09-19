@@ -15,6 +15,12 @@ MAINNET_URL = "https://api.binance.com"
 V1_SYMBOLS = frozenset({"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "SUIUSDT"})
 MAINNET_GRADUATION_CHAINS = 20
 HARD_MAINNET_CAP_USDT = Decimal("25")
+VN_BENCHMARK_SYMBOL = "VN30"
+VN_V1_SYMBOLS = frozenset({"FPT", "MBB"})
+DEFAULT_VN_NEWS_FEEDS = (
+    "https://cafef.vn/thi-truong-chung-khoan.rss",
+    "https://vietstock.vn/144/chung-khoan/co-phieu.rss",
+)
 REFLECTION_HORIZON_DAYS = 20
 BENCHMARK_SYMBOL = "BTCUSDT"
 MAX_TICKET_TTL_MINUTES = 30
@@ -91,6 +97,9 @@ class Settings:
     binance: BinanceSettings = field(default_factory=BinanceSettings)
     schedule: ScheduleSettings = field(default_factory=ScheduleSettings)
     telegram_allowlist: tuple[str, ...] = ()
+    vn_symbols: tuple[str, ...] = ("FPT", "MBB")
+    vn_news_feeds: tuple[str, ...] = DEFAULT_VN_NEWS_FEEDS
+    fundamentals_dir: Path = Path("data/fundamentals")
 
 
 def _local_path(base: Path, value: str) -> Path:
@@ -127,6 +136,8 @@ def _validate(settings: Settings) -> None:
         raise ValueError("V1 allowlist supports USDT pairs only")
     if any(symbol not in settings.coingecko_ids for symbol in settings.symbols):
         raise ValueError("every symbol requires a CoinGecko id")
+    if any(symbol not in VN_V1_SYMBOLS for symbol in settings.vn_symbols):
+        raise ValueError("VN symbol is outside the V1 allowlist (FPT, MBB)")
     for name in (
         "per_trade",
         "max_symbol",
@@ -165,6 +176,13 @@ def load_settings(path: Path) -> Settings:
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     base = path.parent
     symbols = tuple(str(item).upper() for item in raw.get("symbols", Settings().symbols))
+    vn_symbols = tuple(str(item).upper() for item in raw.get("vn_symbols", Settings().vn_symbols))
+    vn_news_feeds = tuple(
+        str(value) for value in raw.get("vn_news_feeds", DEFAULT_VN_NEWS_FEEDS)
+    )
+    fundamentals_dir = _local_path(
+        base, raw.get("fundamentals_dir", "data/fundamentals")
+    )
     models_raw = raw.get("models", {})
     model_defaults = ModelSettings()
     binance_raw = raw.get("binance", {})
@@ -198,6 +216,9 @@ def load_settings(path: Path) -> Settings:
             health_minutes=int(schedule_raw.get("health_minutes", 15)),
         ),
         telegram_allowlist=tuple(str(value) for value in raw.get("telegram_allowlist", [])),
+        vn_symbols=vn_symbols,
+        vn_news_feeds=vn_news_feeds,
+        fundamentals_dir=fundamentals_dir,
     )
     _validate(settings)
     return settings

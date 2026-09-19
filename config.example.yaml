@@ -44,3 +44,9 @@ schedule:
   health_minutes: 15
 
 telegram_allowlist: []
+
+vn_symbols: [FPT, MBB]
+vn_news_feeds:
+  - https://cafef.vn/thi-truong-chung-khoan.rss
+  - https://vietstock.vn/144/chung-khoan/co-phieu.rss
+fundamentals_dir: data/fundamentals
