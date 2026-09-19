@@ -12,7 +12,7 @@ thể làm mất tiền thật; mặc định cả Testnet execution và Mainnet
 
 - Chỉ Binance Spot, long-only; không Margin, không vay/short và không thực thi
   derivatives.
-- Allowlist V1: `BTCUSDT`, `ETHUSDT`, `BNBUSDT`, `SOLUSDT`.
+- Allowlist V1: `BTCUSDT`, `ETHUSDT`, `BNBUSDT`, `SOLUSDT`, `SUIUSDT`.
 - Rủi ro tối đa 0,5% NAV/lệnh, 20% NAV/coin, tổng crypto 80% NAV và giữ ít nhất
   20% NAV dưới dạng USDT khả dụng.
 - Mainnet bị khóa ở tối đa 25 USDT/order chain cho đến khi có ít nhất 20 chain
@@ -44,9 +44,15 @@ Nếu sau này dùng Mainnet, tạo một API key riêng chỉ có quyền Spot 
 - không dùng lại key Testnet;
 - lưu trong `BINANCE_MAINNET_API_KEY` và `BINANCE_MAINNET_API_SECRET`.
 
-Đặt `OPENAI_API_KEY`, tùy chọn `COINGECKO_DEMO_API_KEY`, danh sách RSS trong
-`config.yaml`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_HOME_CHANNEL` và Telegram user ID
-trong `telegram_allowlist`. Chỉ process Hermes gateway được inject
+Mặc định, `config.example.yaml` dùng Gemini; đặt `GEMINI_API_KEY`, tùy chọn
+`COINGECKO_DEMO_API_KEY`, danh sách RSS trong `config.yaml`, `TELEGRAM_BOT_TOKEN`,
+`TELEGRAM_HOME_CHANNEL` và Telegram user ID trong `telegram_allowlist`. Muốn dùng
+OpenAI, đặt `models.provider: openai`, khôi phục model `gpt-5.4-mini`/`gpt-5.5` và
+đặt `OPENAI_API_KEY`. Crypto Desk không tự fallback giữa Gemini và OpenAI; lỗi
+provider luôn kết thúc bằng `NO_TRADE`.
+
+Gemini chạy native Interactions API với `store=False`; request/evidence không được
+lưu thành server-side interaction. Chỉ process Hermes gateway được inject
 `HERMES_TELEGRAM_INGRESS_SECRET`; không đặt secret này trong `.env` của project,
 shell tương tác hoặc nội dung tin nhắn. CLI dùng nó để ký approval metadata trong
 process và không in proof. Không commit `.env` hoặc `config.yaml`.

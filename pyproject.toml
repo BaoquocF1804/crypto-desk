@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "binance-sdk-spot==10.0.0",
+  "google-genai==2.12.1",
   "httpx==0.28.1",
   "openai==2.45.0",
   "pydantic==2.13.4",

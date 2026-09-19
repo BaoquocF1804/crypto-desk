@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -30,6 +30,7 @@ class AnalysisRun:
     run_id: str
     cutoff: str
     decision: ResearchDecision
+    current_price: Decimal | None
     report_dir: Path
     ticket_id: str | None = None
 
@@ -67,7 +68,7 @@ class CryptoDeskService:
         results: list[ScreenResult] = []
         for symbol in self.settings.symbols:
             try:
-                snapshot = builder.build(symbol, effective_cutoff)
+                snapshot = builder.build(symbol, effective_cutoff, live=cutoff is None)
                 result = screen(
                     snapshot,
                     allowlist=self.settings.symbols,
@@ -103,11 +104,20 @@ class CryptoDeskService:
         effective_cutoff = self._aware(cutoff or self._now())
         snapshot: EvidenceSnapshot | None = None
         reports: dict[str, Any] = {}
+        llm_payload: dict[str, Any] = {
+            "provider": self.settings.models.provider,
+            "quick_model": self.settings.models.quick,
+            "deep_model": self.settings.models.deep,
+            "quick_thinking": self.settings.models.quick_thinking,
+            "deep_thinking": self.settings.models.deep_thinking,
+            "calls": [],
+        }
         evidence_payload: Any
+        prior_thesis, prior_run_id = self._build_prior_thesis(symbol, None, effective_cutoff)
         try:
-            snapshot = builder.build(symbol, effective_cutoff)
+            snapshot = builder.build(symbol, effective_cutoff, live=cutoff is None)
         except EvidenceError as exc:
-            decision = self._no_trade(symbol, str(exc))
+            decision = self._no_trade(symbol, str(exc), prior_run_id=prior_run_id)
             evidence_payload = {
                 "symbol": symbol,
                 "cutoff": iso(effective_cutoff),
@@ -115,7 +125,7 @@ class CryptoDeskService:
             }
         except Exception as exc:
             reason = f"evidence_provider:{type(exc).__name__}"
-            decision = self._no_trade(symbol, reason)
+            decision = self._no_trade(symbol, reason, prior_run_id=prior_run_id)
             evidence_payload = {
                 "symbol": symbol,
                 "cutoff": iso(effective_cutoff),
@@ -123,33 +133,54 @@ class CryptoDeskService:
             }
         else:
             evidence_payload = snapshot
+            prior_thesis, prior_run_id = self._build_prior_thesis(
+                symbol, snapshot, effective_cutoff
+            )
             committee = self._require_committee()
             reflections = tuple(
                 json.dumps(item["payload"], ensure_ascii=False)
                 for item in self.store.list_reflections(symbol)[:5]
             )
             try:
-                committee_result = committee.run(
-                    snapshot,
-                    reflections=reflections,
-                    position_quantity=self._position_quantity(symbol),
-                )
+                try:
+                    committee_result = committee.run(
+                        snapshot,
+                        reflections=reflections,
+                        prior_thesis=prior_thesis,
+                        position_quantity=self._position_quantity(symbol),
+                    )
+                except TypeError as exc:
+                    if "prior_thesis" in str(exc):
+                        committee_result = committee.run(
+                            snapshot,
+                            reflections=reflections,
+                            position_quantity=self._position_quantity(symbol),
+                        )
+                    else:
+                        raise
                 decision = committee_result.decision
+                if prior_run_id and decision.prior_run_id is None:
+                    decision = replace(decision, prior_run_id=prior_run_id)
                 reports = committee_result.reports
+                llm_payload["calls"] = to_jsonable(getattr(committee_result, "calls", ()))
             except Exception as exc:
                 decision = self._no_trade(
                     symbol,
                     f"committee:{type(exc).__name__}",
+                    prior_run_id=prior_run_id,
                 )
 
         run_id = str(uuid.uuid4())
         report_dir = self.settings.artifacts / effective_cutoff.date().isoformat() / run_id
         report_dir.mkdir(parents=True, exist_ok=False)
         self._write_json(report_dir / "evidence.json", evidence_payload)
+        if prior_thesis:
+            self._write_json(report_dir / "prior_thesis.json", prior_thesis)
         self._write_json(
             report_dir / "analysts.json",
             {name: self._report_payload(report) for name, report in reports.items()},
         )
+        self._write_json(report_dir / "llm.json", llm_payload)
         self._write_json(report_dir / "decision.json", decision)
         (report_dir / "report.md").write_text(
             self._markdown_report(
@@ -157,6 +188,7 @@ class CryptoDeskService:
                 cutoff=effective_cutoff,
                 reports=reports,
                 snapshot=snapshot,
+                prior_thesis=prior_thesis,
             ),
             encoding="utf-8",
         )
@@ -171,6 +203,7 @@ class CryptoDeskService:
             run_id=run_id,
             cutoff=iso(effective_cutoff),
             decision=decision,
+            current_price=snapshot.binance_mid if snapshot else None,
             report_dir=report_dir,
             ticket_id=ticket_id,
         )
@@ -201,6 +234,7 @@ class CryptoDeskService:
             return {"status": "ALREADY_DONE", "bucket": bucket}
 
         cutoff = datetime.combine(target_date, time(0, 15), tzinfo=UTC)
+        reflection_run_ids = self.refresh_reflections(cutoff)
         screen_results = self.screen(cutoff)
         runs: list[str] = []
         for result in screen_results:
@@ -212,6 +246,7 @@ class CryptoDeskService:
             "bucket": bucket,
             "screen": [to_jsonable(result) for result in screen_results],
             "run_ids": runs,
+            "reflection_run_ids": reflection_run_ids,
         }
 
     def health(self, *, due: bool = False) -> dict[str, Any]:
@@ -277,14 +312,17 @@ class CryptoDeskService:
         entry: Decimal,
         closes: tuple[Decimal, ...],
         benchmark_closes: tuple[Decimal, ...],
-    ) -> dict[str, Decimal]:
-        if len(closes) < 21:
+        decision_action: str | None = None,
+    ) -> dict[str, Any]:
+        if len(closes) < 20:
             raise ValueError("Reflection requires 20 completed daily periods")
-        payload = calculate_reflection(
+        payload: dict[str, Any] = calculate_reflection(
             entry=entry,
             closes=closes,
             benchmark_closes=benchmark_closes,
         )
+        if decision_action is not None:
+            payload["decision_action"] = decision_action
         if not self.store.save_reflection(
             run_id,
             symbol,
@@ -292,6 +330,44 @@ class CryptoDeskService:
         ):
             raise ValueError(f"Reflection already exists for {run_id}")
         return payload
+
+    def refresh_reflections(self, cutoff: datetime) -> list[str]:
+        builder = self._require_builder()
+        completed_before = iso(self._aware(cutoff) - timedelta(days=20))
+        saved: list[str] = []
+        for run in self.store.unreflected_runs(completed_before):
+            if not run["decision"].get("evidence_ids"):
+                continue
+            try:
+                evidence = json.loads(
+                    (Path(run["report_dir"]) / "evidence.json").read_text(encoding="utf-8")
+                )
+                entry = Decimal(str(evidence["binance_mid"]))
+                run_cutoff = datetime.fromisoformat(run["cutoff"]).astimezone(UTC)
+                start = (run_cutoff + timedelta(days=1)).replace(
+                    hour=0,
+                    minute=0,
+                    second=0,
+                    microsecond=0,
+                )
+                closes = builder.reflection_closes(run["symbol"], start)
+                benchmark = (
+                    ()
+                    if run["symbol"] == "BTCUSDT"
+                    else builder.reflection_closes("BTCUSDT", start)
+                )
+                self.save_reflection(
+                    run_id=run["id"],
+                    symbol=run["symbol"],
+                    entry=entry,
+                    closes=closes,
+                    benchmark_closes=benchmark,
+                    decision_action=str(run["decision"]["action"]),
+                )
+            except (EvidenceError, OSError, ValueError, KeyError, TypeError):
+                continue
+            saved.append(run["id"])
+        return saved
 
     def _health_alerts(
         self,
@@ -324,13 +400,23 @@ class CryptoDeskService:
             if raw_stop is None or Decimal(str(raw_stop)) <= 0:
                 continue
             stop_prices.setdefault(str(order.get("symbol")), []).append(Decimal(str(raw_stop)))
+        # Only the configured allowlist is actively researched/protected. On
+        # testnet the account holds hundreds of unmanaged external + unpriced
+        # dust assets; emitting a per-asset alert for each floods every alert
+        # sink (Telegram). Aggregate those into one count each instead.
+        configured = set(self.settings.symbols)
+        unpriced_count = 0
+        external_count = 0
         for position in snapshot.positions:
             if position.get("unpriced"):
-                alerts.append(f"unpriced_asset:{position.get('asset')}")
+                unpriced_count += 1
                 continue
             symbol = str(position.get("symbol", ""))
             value = Decimal(position.get("value_usdt", "0"))
             if not symbol or value <= 0:
+                continue
+            if symbol not in configured:
+                external_count += 1
                 continue
             if value > self.settings.risk.max_symbol * snapshot.nav_usdt:
                 alerts.append(f"max_symbol:{symbol}")
@@ -359,6 +445,10 @@ class CryptoDeskService:
                 if self._run_evidence_stale(latest, now):
                     alerts.append(f"stale_evidence:{symbol}")
                     symbols.add(symbol)
+        if external_count:
+            alerts.append(f"external_unmanaged:{external_count}")
+        if unpriced_count:
+            alerts.append(f"unpriced_assets:{unpriced_count}")
         return alerts, symbols
 
     @staticmethod
@@ -520,6 +610,86 @@ class CryptoDeskService:
             return report.model_dump(mode="json")
         return to_jsonable(report)
 
+    def _build_prior_thesis(
+        self,
+        symbol: str,
+        snapshot: EvidenceSnapshot | None,
+        cutoff: datetime,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        prior_run = self.store.latest_valid_run(symbol, before_cutoff=iso(cutoff))
+        if not prior_run:
+            return None, None
+
+        prior_id = str(prior_run["id"])
+        prior_decision = prior_run.get("decision", {})
+        prior_cutoff_str = prior_run.get("cutoff")
+        hours_ago = Decimal("0")
+        if prior_cutoff_str:
+            try:
+                prior_dt = datetime.fromisoformat(prior_cutoff_str).astimezone(UTC)
+                diff = (cutoff - prior_dt).total_seconds() / 3600
+                hours_ago = Decimal(str(round(max(0.0, diff), 1)))
+            except Exception:
+                pass
+
+        prior_price: Decimal | None = None
+        report_dir_str = prior_run.get("report_dir")
+        if report_dir_str:
+            ev_path = Path(report_dir_str) / "evidence.json"
+            if ev_path.exists():
+                try:
+                    ev_data = json.loads(ev_path.read_text(encoding="utf-8"))
+                    if ev_data.get("binance_mid") is not None:
+                        prior_price = Decimal(str(ev_data["binance_mid"]))
+                except Exception:
+                    pass
+        if prior_price is None and prior_decision.get("entry") is not None:
+            try:
+                prior_price = Decimal(str(prior_decision["entry"]))
+            except Exception:
+                pass
+
+        current_mid = snapshot.binance_mid if snapshot else None
+        price_change_pct: Decimal | None = None
+        if prior_price and current_mid and prior_price > Decimal("0"):
+            price_change_pct = (
+                (current_mid - prior_price) / prior_price * Decimal("100")
+            ).quantize(Decimal("0.01"))
+
+        prior_entry = (
+            Decimal(str(prior_decision["entry"]))
+            if prior_decision.get("entry") is not None
+            else None
+        )
+        prior_stop = (
+            Decimal(str(prior_decision["stop"])) if prior_decision.get("stop") is not None else None
+        )
+        prior_target = (
+            Decimal(str(prior_decision["target"]))
+            if prior_decision.get("target") is not None
+            else None
+        )
+
+        prior_payload: dict[str, Any] = {
+            "run_id": prior_id,
+            "cutoff": prior_cutoff_str,
+            "hours_ago": str(hours_ago),
+            "action": str(prior_decision.get("action", "NO_TRADE")),
+            "conviction": str(prior_decision.get("conviction", "0")),
+            "prior_price": str(prior_price) if prior_price is not None else None,
+            "current_price": str(current_mid) if current_mid is not None else None,
+            "price_change_pct": str(price_change_pct) if price_change_pct is not None else None,
+            "bull_case": str(prior_decision.get("bull_case", ""))[:500],
+            "bear_case": str(prior_decision.get("bear_case", ""))[:500],
+            "catalysts": [str(c)[:100] for c in prior_decision.get("catalysts", [])][:3],
+            "invalidation": str(prior_decision.get("invalidation", ""))[:300],
+            "entry": str(prior_entry) if prior_entry is not None else None,
+            "stop": str(prior_stop) if prior_stop is not None else None,
+            "target": str(prior_target) if prior_target is not None else None,
+            "futures_bias": prior_decision.get("futures_bias"),
+        }
+        return prior_payload, prior_id
+
     def _markdown_report(
         self,
         *,
@@ -527,6 +697,7 @@ class CryptoDeskService:
         cutoff: datetime,
         reports: dict[str, Any],
         snapshot: EvidenceSnapshot | None,
+        prior_thesis: dict[str, Any] | None = None,
     ) -> str:
         def price(value: Decimal | None) -> str:
             return str(value) if value is not None else "N/A"
@@ -536,21 +707,106 @@ class CryptoDeskService:
             "",
             f"- Thời điểm: {iso(cutoff)}",
             f"- Môi trường: {self.settings.binance.environment}",
+            f"- LLM: {self.settings.models.provider} "
+            f"({self.settings.models.quick} / {self.settings.models.deep})",
             f"- Quyết định: **{decision.action}**",
             f"- Conviction: {decision.conviction}/10",
             f"- Entry / Stop / Target: {price(decision.entry)} / "
             f"{price(decision.stop)} / {price(decision.target)}",
             f"- Lý do: {decision.reason}",
-            "",
-            "## Luận điểm",
-            "",
-            f"- Bull: {decision.bull_case}",
-            f"- Bear: {decision.bear_case}",
-            f"- Invalidation: {decision.invalidation}",
-            "",
-            "## Báo cáo hội đồng",
-            "",
         ]
+        if decision.thesis_continuity and decision.thesis_continuity != "NEW":
+            lines.append(f"- Kế thừa luận điểm (Continuity): **{decision.thesis_continuity}**")
+        if decision.prior_run_id:
+            lines.append(f"- Tham chiếu phân tích trước: `{decision.prior_run_id}`")
+
+        lines.extend(
+            [
+                "",
+                "## Luận điểm",
+                "",
+                f"- Bull: {decision.bull_case}",
+                f"- Bear: {decision.bear_case}",
+                f"- Invalidation: {decision.invalidation}",
+                "",
+            ]
+        )
+
+        if prior_thesis:
+            lines.extend(
+                [
+                    "## Đối soát Luận điểm Trước (Thesis Tracking)",
+                    "",
+                    f"- **Trạng thái tiếp nối:** **{decision.thesis_continuity}**",
+                    f"- **Lần phân tích trước:** `{prior_thesis.get('cutoff')}` ({prior_thesis.get('hours_ago')}h trước)",
+                    f"- **Mã tham chiếu (Run ID):** `{prior_thesis.get('run_id')}`",
+                    f"- **Quyết định trước:** `{prior_thesis.get('action')}` (Conviction: {prior_thesis.get('conviction')}/10)",
+                ]
+            )
+            if prior_thesis.get("prior_price") and prior_thesis.get("current_price"):
+                chg = prior_thesis.get("price_change_pct")
+                chg_str = (
+                    f" ({'+' if chg and not str(chg).startswith(('-', '+')) else ''}{chg}%)"
+                    if chg is not None
+                    else ""
+                )
+                lines.append(
+                    f"- **Biến động giá:** Từ `{prior_thesis.get('prior_price')}` đến `{prior_thesis.get('current_price')}`{chg_str}"
+                )
+            if prior_thesis.get("invalidation"):
+                lines.append(f"- **Ngưỡng vô hiệu trước:** {prior_thesis.get('invalidation')}")
+            lines.append("")
+
+        if decision.futures_bias or decision.futures_setups:
+            lines.extend(
+                [
+                    "## Kịch bản giao dịch Phái sinh (Futures Setups — Tham khảo, Non-executing)",
+                    "",
+                    "> **LƯU Ý:** Các kịch bản dưới đây chỉ phục vụ nghiên cứu và lập kế hoạch giao dịch cá nhân. Hệ thống **tuyệt đối không gọi lệnh** (non-executing) ra sàn.",
+                    "",
+                    f"- **Thiên hướng Futures (Bias):** **{decision.futures_bias or 'NEUTRAL'}**",
+                    "",
+                ]
+            )
+            if snapshot is not None:
+                lines.extend(
+                    [
+                        "### Chỉ số phái sinh chính",
+                        "",
+                        f"- Funding Rate: `{snapshot.funding_rate}` ({getattr(snapshot, 'funding_rate_trend', 'stable')})",
+                        f"- Open Interest: `{snapshot.open_interest}`"
+                        + (
+                            f" (Biến động 1h: `{snapshot.oi_change_1h_pct:+.2f}%`)"
+                            if getattr(snapshot, "oi_change_1h_pct", None) is not None
+                            else ""
+                        ),
+                        f"- Tỷ lệ Long/Short toàn cầu (Đám đông): `{getattr(snapshot, 'long_short_ratio', None) or 'N/A'}`",
+                        f"- Tỷ lệ Long/Short Top Trader (Cá mập): `{getattr(snapshot, 'top_trader_ratio', None) or 'N/A'}`",
+                        f"- Tỷ lệ Taker Mua/Bán: `{getattr(snapshot, 'taker_buy_sell_ratio', None) or 'N/A'}`",
+                        "",
+                    ]
+                )
+            if decision.futures_setups:
+                lines.extend(
+                    [
+                        "### Thiết lập Entry / SL / TP",
+                        "",
+                        "| Hướng | Entry (USDT) | Stop Loss (USDT) | Take Profit (USDT) | R:R | Luận điểm |",
+                        "| :--- | :--- | :--- | :--- | :--- | :--- |",
+                    ]
+                )
+                for setup in decision.futures_setups:
+                    lines.append(
+                        f"| **{setup.direction}** | `{setup.entry}` | `{setup.stop}` | `{setup.target}` | `{setup.risk_reward_ratio}` | {setup.rationale} |"
+                    )
+                lines.append("")
+
+        lines.extend(
+            [
+                "## Báo cáo hội đồng",
+                "",
+            ]
+        )
         for name, report in reports.items():
             lines.extend(
                 [
@@ -588,7 +844,11 @@ class CryptoDeskService:
         return "\n".join(lines) + "\n"
 
     @staticmethod
-    def _no_trade(symbol: str, reason: str) -> ResearchDecision:
+    def _no_trade(
+        symbol: str,
+        reason: str,
+        prior_run_id: str | None = None,
+    ) -> ResearchDecision:
         return ResearchDecision(
             symbol=symbol,
             action="NO_TRADE",
@@ -602,6 +862,8 @@ class CryptoDeskService:
             target=None,
             evidence_ids=(),
             reason=reason,
+            thesis_continuity="NEW",
+            prior_run_id=prior_run_id,
         )
 
 
@@ -619,12 +881,14 @@ def calculate_reflection(
         if benchmark_closes[0] <= 0:
             raise ValueError("Benchmark start must be positive")
         benchmark_return = benchmark_closes[-1] / benchmark_closes[0] - Decimal("1")
+        alpha = realized_return - benchmark_return
     else:
         benchmark_return = Decimal("0")
+        alpha = Decimal("0")
     return {
         "realized_return": realized_return,
         "maximum_adverse_excursion": min(returns),
         "maximum_favorable_excursion": max(returns),
         "benchmark_return": benchmark_return,
-        "alpha": realized_return - benchmark_return,
+        "alpha": alpha,
     }

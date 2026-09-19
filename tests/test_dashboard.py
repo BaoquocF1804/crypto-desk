@@ -10,6 +10,7 @@ import pytest
 
 from crypto_desk.config import Settings
 from crypto_desk.dashboard import (
+    CurrentAsset,
     DashboardPublishError,
     build_dashboard_snapshot,
     publish_dashboard,
@@ -149,20 +150,39 @@ def test_snapshot_with_configured_and_external_assets(tmp_path: Path):
     assert positions_by_symbol["BTCUSDT"].value_usdt == Decimal("63963.28500000")
     assert snapshot.portfolio.external_assets_count == 2
     assert snapshot.portfolio.external_value_usdt == Decimal("1500")
+    assets = {asset.asset: asset for asset in snapshot.portfolio.assets}
+    assert assets["USDT"].state == "cash"
+    assert assets["BTC"].state == "managed"
+    assert assets["ADA"].state == "external"
+    assert assets["ADA"].mark == Decimal("1000")
 
 
-def test_unpriced_assets_are_counted_but_never_named(tmp_path: Path):
+def test_unpriced_assets_are_listed_without_fake_prices(tmp_path: Path):
     store = Store(tmp_path / "crypto.db")
     settings = make_settings()
     store.save_snapshot(full_snapshot())
 
     snapshot = build_dashboard_snapshot(settings, store)
-    serialized = snapshot.model_dump(mode="json")
-
     assert snapshot.portfolio.unpriced_assets_count == 26
-    dumped = str(serialized)
-    for i in range(26):
-        assert f"SHITCOIN{i}" not in dumped
+    unpriced = [asset for asset in snapshot.portfolio.assets if asset.state == "unpriced"]
+    assert len(unpriced) == 26
+    assert {asset.asset for asset in unpriced} == {f"SHITCOIN{i}" for i in range(26)}
+    assert all(asset.mark is None and asset.value is None for asset in unpriced)
+
+
+def test_current_asset_json_uses_plain_decimal_not_scientific_notation():
+    asset = CurrentAsset(
+        asset="TINY",
+        quantity=Decimal("1"),
+        mark=Decimal("9.75E-8"),
+        value=Decimal("9.75E-8"),
+        state="external",
+    )
+
+    payload = asset.model_dump(mode="json")
+
+    assert payload["mark"] == "0.0000000975"
+    assert payload["value"] == "0.0000000975"
 
 
 def test_nav_gross_and_deployed_pct_use_decimal(tmp_path: Path):
@@ -201,6 +221,37 @@ def test_latest_blocked_attempt_and_latest_valid_fallback_both_present(tmp_path:
     assert btc.latest_valid_decision.action == "HOLD"
 
 
+def test_symbol_24h_change_comes_from_latest_valid_evidence(tmp_path: Path):
+    store = Store(tmp_path / "crypto.db")
+    settings = make_settings()
+    report_dir = tmp_path / "run-1"
+    report_dir.mkdir()
+    (report_dir / "evidence.json").write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "kind": "spot",
+                        "payload": {"change_24h_pct": "2.5"},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    store.save_run(
+        "run-1",
+        "2026-07-18T05:14:11+00:00",
+        make_decision(evidence_ids=("evidence-1",)),
+        report_dir,
+    )
+
+    snapshot = build_dashboard_snapshot(settings, store)
+
+    btc = next(item for item in snapshot.symbols if item.symbol == "BTCUSDT")
+    assert btc.change_24h_pct == Decimal("2.5")
+
+
 def test_legitimate_no_trade_with_evidence_is_valid_research(tmp_path: Path):
     store = Store(tmp_path / "crypto.db")
     settings = make_settings()
@@ -226,6 +277,7 @@ def test_no_snapshot_yields_safe_zeroed_portfolio(tmp_path: Path):
     assert snapshot.portfolio.nav_usdt == Decimal("0")
     assert snapshot.portfolio.gross_exposure_usdt == Decimal("0")
     assert snapshot.portfolio.deployed_pct == Decimal("0")
+    assert snapshot.portfolio.assets == []
     assert snapshot.portfolio.configured_positions == []
     assert snapshot.portfolio.external_assets_count == 0
     assert snapshot.portfolio.unpriced_assets_count == 0
@@ -499,3 +551,30 @@ def test_publish_dashboard_from_env_sends_request_with_configured_credentials(
     publish_dashboard_from_env(snapshot, strict=True)
 
     assert captured["headers"]["Authorization"] == "Bearer ingest-secret"
+
+
+def test_local_publish_does_not_require_sites_bypass(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    snapshot = make_dashboard_snapshot(tmp_path)
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["headers"] = request.headers
+        return httpx.Response(200)
+
+    monkeypatch.setenv(
+        "CRYPTO_DESK_DASHBOARD_INGEST_URL",
+        "http://localhost:3001/api/ingest",
+    )
+    monkeypatch.setenv("CRYPTO_DESK_DASHBOARD_INGEST_TOKEN", "ingest-secret")
+    monkeypatch.delenv("CRYPTO_DESK_SITES_BYPASS_TOKEN", raising=False)
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        "crypto_desk.dashboard.httpx.Client",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(handler)),
+    )
+
+    publish_dashboard_from_env(snapshot, strict=True)
+
+    assert "OAI-Sites-Authorization" not in captured["headers"]

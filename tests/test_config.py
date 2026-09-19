@@ -48,6 +48,89 @@ risk:
     assert settings.symbols == ("BTCUSDT", "ETHUSDT")
     assert settings.risk.per_trade == Decimal("0.005")
     assert settings.risk.mainnet_initial_order_cap_usdt == Decimal("25")
+    assert settings.models.provider == "gemini"
+    assert settings.models.quick == "gemini-3.6-flash"
+    assert settings.models.deep == "gemini-3.6-flash"
+
+
+def test_config_accepts_explicit_openai_provider(tmp_path: Path):
+    config = write_config(
+        tmp_path / "config.yaml",
+        """
+models:
+  provider: openai
+  quick: gpt-5.4-mini
+  deep: gpt-5.5
+  quick_thinking: low
+  deep_thinking: high
+""",
+    )
+
+    settings = load_settings(config)
+
+    assert settings.models.provider == "openai"
+    assert settings.models.deep == "gpt-5.5"
+
+
+def test_config_accepts_vertexai_provider_and_gemini_2_5_flash(tmp_path: Path):
+    config = write_config(
+        tmp_path / "config.yaml",
+        """
+models:
+  provider: vertexai
+  quick: gemini-2.5-flash
+  deep: gemini-2.5-flash
+  quick_thinking: low
+  deep_thinking: high
+""",
+    )
+
+    settings = load_settings(config)
+
+    assert settings.models.provider == "vertexai"
+    assert settings.models.quick == "gemini-2.5-flash"
+    assert settings.models.deep == "gemini-2.5-flash"
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ("models:\n  provider: unknown\n", "models.provider"),
+        (
+            "models:\n  provider: gemini\n  quick: gemini-flash-latest\n",
+            "allowlist",
+        ),
+        (
+            "models:\n  provider: openai\n  quick: gemini-3.6-flash\n",
+            "require models.provider=gemini",
+        ),
+        ("models:\n  quick_thinking: medium\n", "quick_thinking"),
+    ],
+)
+def test_config_rejects_invalid_provider_models_and_thinking(
+    tmp_path: Path,
+    body: str,
+    message: str,
+):
+    config = write_config(tmp_path / "config.yaml", body)
+
+    with pytest.raises(ValueError, match=message):
+        load_settings(config)
+
+
+def test_config_accepts_gemini_3_flash_preview(tmp_path: Path):
+    config = write_config(
+        tmp_path / "config.yaml",
+        "models:\n"
+        "  provider: gemini\n"
+        "  quick: gemini-3-flash-preview\n"
+        "  deep: gemini-3-flash-preview\n",
+    )
+
+    settings = load_settings(config)
+
+    assert settings.models.quick == "gemini-3-flash-preview"
+    assert settings.models.deep == "gemini-3-flash-preview"
 
 
 def test_config_rejects_mainnet_cap_below_five_usdt(tmp_path: Path):

@@ -99,7 +99,7 @@ class FakePublicClient:
             as_of=CUTOFF - timedelta(seconds=10),
         )
         self.ticker = fetched(
-            {"quoteVolume": "750000000"},
+            {"quoteVolume": "750000000", "priceChangePercent": "2.5"},
             as_of=CUTOFF - timedelta(seconds=10),
         )
         self.funding_result = fetched(
@@ -172,6 +172,16 @@ def test_valid_snapshot_contains_all_evidence_kinds_and_symbol_rules():
     assert snapshot.reference_usdt == Decimal("100000")
     assert len(snapshot.daily_closes) == 120
     assert len(snapshot.evidence_ids) == 4
+    spot = next(item for item in snapshot.items if item.kind == "spot")
+    assert Decimal(spot.payload["change_24h_pct"]) == Decimal("2.5")
+
+
+def test_snapshot_is_reused_for_the_same_cutoff():
+    builder = EvidenceBuilder(FakePublicClient(), {"BTCUSDT": "bitcoin"})
+
+    first = builder.build("BTCUSDT", CUTOFF)
+
+    assert builder.build("BTCUSDT", CUTOFF) is first
 
 
 def test_price_deviation_over_half_percent_blocks_trade():
@@ -194,6 +204,18 @@ def test_future_timestamp_is_rejected():
 
     with pytest.raises(EvidenceError, match="future"):
         EvidenceBuilder(client, {"BTCUSDT": "bitcoin"}).build("BTCUSDT", CUTOFF)
+
+
+def test_fetch_timestamp_after_live_cutoff_is_not_future_evidence():
+    client = FakePublicClient()
+    fetched_at = CUTOFF + timedelta(seconds=1)
+    client.exchange = replace(
+        client.exchange,
+        fetched_at=fetched_at,
+        as_of=fetched_at,
+    )
+
+    EvidenceBuilder(client, {"BTCUSDT": "bitcoin"}).build("BTCUSDT", CUTOFF, live=True)
 
 
 def test_open_trailing_candles_are_dropped_before_time_leakage_check():
@@ -442,3 +464,98 @@ def test_server_error_is_retried_then_raised(monkeypatch):
     with pytest.raises(httpx.HTTPStatusError):
         client.book_ticker("BTCUSDT")
     assert attempts["count"] == 2
+
+
+def test_rate_limit_honors_retry_after(monkeypatch):
+    delays: list[float] = []
+    monkeypatch.setattr("crypto_desk.data.time.sleep", delays.append)
+    attempts = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return httpx.Response(429, headers={"Retry-After": "2"})
+        return httpx.Response(200, json={"bidPrice": "99990", "askPrice": "100010"})
+
+    client = PublicDataClient(
+        (),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        now=lambda: CUTOFF,
+    )
+
+    assert client.book_ticker("BTCUSDT").payload["bidPrice"] == "99990"
+    assert delays == [2]
+
+
+def test_evidence_builder_collects_extended_futures_metrics():
+    class ExtendedFakeClient(FakePublicClient):
+        def funding_history(self, symbol: str, limit: int = 3) -> Fetched:
+            return fetched(
+                [
+                    {
+                        "fundingRate": "0.0001",
+                        "fundingTime": int((CUTOFF - timedelta(hours=8)).timestamp() * 1000),
+                    },
+                    {
+                        "fundingRate": "0.0002",
+                        "fundingTime": int(CUTOFF.timestamp() * 1000),
+                    },
+                ],
+                provider="binance-usdm",
+                source="https://fapi.binance.com/fapi/v1/fundingRate",
+            )
+
+        def open_interest_hist(self, symbol: str, period: str = "1h", limit: int = 2) -> Fetched:
+            return fetched(
+                [
+                    {
+                        "sumOpenInterest": "100000",
+                        "timestamp": int((CUTOFF - timedelta(hours=1)).timestamp() * 1000),
+                    },
+                    {
+                        "sumOpenInterest": "105000",
+                        "timestamp": int(CUTOFF.timestamp() * 1000),
+                    },
+                ],
+                provider="binance-usdm",
+                source="https://fapi.binance.com/futures/data/openInterestHist",
+            )
+
+        def global_long_short_ratio(
+            self, symbol: str, period: str = "1h", limit: int = 1
+        ) -> Fetched:
+            return fetched(
+                [{"longShortRatio": "1.85", "timestamp": int(CUTOFF.timestamp() * 1000)}],
+                provider="binance-usdm",
+                source="https://fapi.binance.com/futures/data/globalLongShortAccountRatio",
+            )
+
+        def top_long_short_ratio(self, symbol: str, period: str = "1h", limit: int = 1) -> Fetched:
+            return fetched(
+                [{"longShortRatio": "1.25", "timestamp": int(CUTOFF.timestamp() * 1000)}],
+                provider="binance-usdm",
+                source="https://fapi.binance.com/futures/data/topLongShortPositionRatio",
+            )
+
+        def taker_long_short_ratio(
+            self, symbol: str, period: str = "1h", limit: int = 1
+        ) -> Fetched:
+            return fetched(
+                [{"buySellRatio": "1.15", "timestamp": int(CUTOFF.timestamp() * 1000)}],
+                provider="binance-usdm",
+                source="https://fapi.binance.com/futures/data/takerlongshortRatio",
+            )
+
+    client = ExtendedFakeClient()
+    snapshot = EvidenceBuilder(client, {"BTCUSDT": "bitcoin"}).build("BTCUSDT", CUTOFF)
+
+    assert snapshot.funding_rate_trend == "rising"
+    assert snapshot.oi_change_1h_pct == Decimal("5")
+    assert snapshot.long_short_ratio == Decimal("1.85")
+    assert snapshot.top_trader_ratio == Decimal("1.25")
+    assert snapshot.taker_buy_sell_ratio == Decimal("1.15")
+
+    derivatives_item = next(item for item in snapshot.items if item.kind == "derivatives")
+    assert derivatives_item.payload["funding_rate_trend"] == "rising"
+    assert Decimal(str(derivatives_item.payload["oi_change_1h_pct"])) == Decimal("5")
+    assert Decimal(str(derivatives_item.payload["long_short_ratio"])) == Decimal("1.85")

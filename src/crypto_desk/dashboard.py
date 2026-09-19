@@ -4,10 +4,12 @@ import json
 import os
 from datetime import datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Callable, Literal, NamedTuple
+from urllib.parse import urlparse
 
 import httpx
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 from .config import Settings
 from .domain import Action, Environment, iso, utcnow
@@ -22,9 +24,11 @@ DASHBOARD_INGEST_URL_ENV = "CRYPTO_DESK_DASHBOARD_INGEST_URL"
 DASHBOARD_INGEST_TOKEN_ENV = "CRYPTO_DESK_DASHBOARD_INGEST_TOKEN"
 SITES_BYPASS_TOKEN_ENV = "CRYPTO_DESK_SITES_BYPASS_TOKEN"
 _MAX_PUBLISH_PAYLOAD_BYTES = 64 * 1024
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 HealthState = Literal["online", "degraded", "offline"]
 AttemptState = Literal["valid", "blocked"]
+AssetState = Literal["cash", "managed", "external", "unpriced"]
 
 
 class LatestAttempt(BaseModel):
@@ -34,6 +38,17 @@ class LatestAttempt(BaseModel):
     cutoff: str
     state: AttemptState
     reason: str
+
+
+class DashboardFuturesSetup(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    direction: Literal["LONG", "SHORT"]
+    entry: Decimal
+    stop: Decimal
+    target: Decimal
+    risk_reward_ratio: Decimal
+    rationale: str
 
 
 class LatestValidDecision(BaseModel):
@@ -50,6 +65,41 @@ class LatestValidDecision(BaseModel):
     entry: Decimal | None
     stop: Decimal | None
     target: Decimal | None
+    futures_bias: str | None = None
+    futures_setups: list[DashboardFuturesSetup] = []
+
+
+class DerivativesIndicators(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    funding_rate: Decimal | None = None
+    funding_rate_trend: str | None = None
+    open_interest: Decimal | None = None
+    oi_change_1h_pct: Decimal | None = None
+    long_short_ratio: Decimal | None = None
+    top_trader_ratio: Decimal | None = None
+    taker_buy_sell_ratio: Decimal | None = None
+
+
+class DashboardMemberVote(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: str
+    label: str
+    stance: str
+    confidence: Decimal
+    summary: str
+
+
+class DashboardCommitteeEvaluation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    recommendation: str  # "LONG" | "SHORT" | "NEUTRAL"
+    long_pct: int
+    short_pct: int
+    neutral_pct: int
+    summary: str
+    member_votes: list[DashboardMemberVote] = []
 
 
 class SymbolSection(BaseModel):
@@ -61,6 +111,9 @@ class SymbolSection(BaseModel):
     position_share_pct: Decimal | None
     latest_attempt: LatestAttempt | None
     latest_valid_decision: LatestValidDecision | None
+    sparkline_closes: list[Decimal] = Field(default_factory=list)
+    derivatives_indicators: DerivativesIndicators | None = None
+    committee_evaluation: DashboardCommitteeEvaluation | None = None
 
 
 class ConfiguredPosition(BaseModel):
@@ -74,6 +127,20 @@ class ConfiguredPosition(BaseModel):
     share_pct: Decimal
 
 
+class CurrentAsset(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    asset: str
+    quantity: Decimal
+    mark: Decimal | None
+    value: Decimal | None
+    state: AssetState
+
+    @field_serializer("quantity", "mark", "value", when_used="json")
+    def serialize_decimal(self, value: Decimal | None) -> str | None:
+        return format(value, "f") if value is not None else None
+
+
 class PortfolioSection(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -83,6 +150,7 @@ class PortfolioSection(BaseModel):
     gross_exposure_usdt: Decimal
     deployed_pct: Decimal
     open_orders_count: int
+    assets: list[CurrentAsset]
     configured_positions: list[ConfiguredPosition]
     external_assets_count: int
     external_value_usdt: Decimal
@@ -142,7 +210,15 @@ def _split_positions(
     positions: list[dict[str, str]],
     settings: Settings,
     nav_usdt: Decimal,
-) -> tuple[list[ConfiguredPosition], int, Decimal, int, dict[str, _PricedShare]]:
+) -> tuple[
+    list[CurrentAsset],
+    list[ConfiguredPosition],
+    int,
+    Decimal,
+    int,
+    dict[str, _PricedShare],
+]:
+    assets: list[CurrentAsset] = []
     configured_positions: list[ConfiguredPosition] = []
     external_assets_count = 0
     external_value_usdt = Decimal("0")
@@ -152,12 +228,31 @@ def _split_positions(
     for position in positions:
         if not _is_priced_position(position):
             unpriced_assets_count += 1
+            assets.append(
+                CurrentAsset(
+                    asset=position["asset"],
+                    quantity=Decimal(position["total"]),
+                    mark=None,
+                    value=None,
+                    state="unpriced",
+                )
+            )
             continue
         value_usdt = Decimal(position["value_usdt"])
         mark_usdt = Decimal(position["mid_usdt"])
         share_pct = value_usdt / nav_usdt * 100 if nav_usdt > 0 else Decimal("0")
         symbol = position["symbol"]
-        if symbol in settings.symbols:
+        managed = symbol in settings.symbols
+        assets.append(
+            CurrentAsset(
+                asset=position["asset"],
+                quantity=Decimal(position["total"]),
+                mark=mark_usdt,
+                value=value_usdt,
+                state="managed" if managed else "external",
+            )
+        )
+        if managed:
             configured_positions.append(
                 ConfiguredPosition(
                     symbol=symbol,
@@ -173,7 +268,16 @@ def _split_positions(
             external_assets_count += 1
             external_value_usdt += value_usdt
 
+    state_order = {"cash": 0, "managed": 1, "external": 2, "unpriced": 3}
+    assets.sort(
+        key=lambda item: (
+            state_order[item.state],
+            -(item.value or Decimal("0")),
+            item.asset,
+        )
+    )
     return (
+        assets,
         configured_positions,
         external_assets_count,
         external_value_usdt,
@@ -205,8 +309,21 @@ def _build_symbols(
 
         latest_valid_row = store.latest_valid_run(symbol)
         latest_valid_decision: LatestValidDecision | None = None
+        change_24h_pct: Decimal | None = None
         if latest_valid_row is not None:
             decision = latest_valid_row["decision"]
+            raw_setups = decision.get("futures_setups") or []
+            futures_setups = [
+                DashboardFuturesSetup(
+                    direction=str(s["direction"]),
+                    entry=Decimal(str(s["entry"])),
+                    stop=Decimal(str(s["stop"])),
+                    target=Decimal(str(s["target"])),
+                    risk_reward_ratio=Decimal(str(s.get("risk_reward_ratio", "1.5"))),
+                    rationale=str(s.get("rationale", "")),
+                )
+                for s in raw_setups
+            ]
             latest_valid_decision = LatestValidDecision(
                 run_id=latest_valid_row["id"],
                 cutoff=latest_valid_row["cutoff"],
@@ -219,19 +336,214 @@ def _build_symbols(
                 entry=Decimal(decision["entry"]) if decision["entry"] is not None else None,
                 stop=Decimal(decision["stop"]) if decision["stop"] is not None else None,
                 target=Decimal(decision["target"]) if decision["target"] is not None else None,
+                futures_bias=decision.get("futures_bias"),
+                futures_setups=futures_setups,
             )
+            evidence = _evidence_payload(latest_valid_row)
+            change_24h_pct = _evidence_change_24h_pct(evidence)
+            mark_usdt = priced.mark_usdt if priced else _evidence_mark_usdt(evidence)
+            sparkline_closes = _evidence_sparkline_closes(evidence, limit=30)
+            derivatives_indicators = _evidence_derivatives_indicators(evidence)
+        else:
+            change_24h_pct = None
+            mark_usdt = priced.mark_usdt if priced else None
+            sparkline_closes = []
+            derivatives_indicators = None
 
         results.append(
             SymbolSection(
                 symbol=symbol,
-                mark_usdt=priced.mark_usdt if priced else None,
-                change_24h_pct=None,
+                mark_usdt=mark_usdt,
+                change_24h_pct=change_24h_pct,
                 position_share_pct=priced.share_pct if priced else None,
                 latest_attempt=latest_attempt,
                 latest_valid_decision=latest_valid_decision,
+                sparkline_closes=sparkline_closes,
+                derivatives_indicators=derivatives_indicators,
+                committee_evaluation=_build_committee_evaluation(latest_valid_row),
             )
         )
     return results
+
+
+def _evidence_payload(run: dict[str, object] | None) -> dict[str, object] | None:
+    if not run:
+        return None
+    try:
+        return json.loads((Path(str(run["report_dir"])) / "evidence.json").read_text())
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _evidence_mark_usdt(evidence: dict[str, object] | None) -> Decimal | None:
+    if not evidence:
+        return None
+    try:
+        items = evidence.get("items") or []
+        spot = next(item for item in items if item.get("kind") == "spot")
+        return Decimal(str(spot["payload"]["mid"]))
+    except (ValueError, KeyError, TypeError, StopIteration):
+        return None
+
+
+def _evidence_change_24h_pct(evidence: dict[str, object] | None) -> Decimal | None:
+    if not evidence:
+        return None
+    try:
+        items = evidence.get("items") or []
+        spot = next(item for item in items if item.get("kind") == "spot")
+        return Decimal(str(spot["payload"]["change_24h_pct"]))
+    except (ValueError, KeyError, TypeError, StopIteration):
+        return None
+
+
+def _evidence_sparkline_closes(
+    evidence: dict[str, object] | None, limit: int = 30
+) -> list[Decimal]:
+    if not evidence:
+        return []
+    try:
+        closes = evidence.get("four_hour_closes") or evidence.get("daily_closes") or []
+        selected = closes[-limit:] if len(closes) > limit else closes
+        return [Decimal(str(c)) for c in selected]
+    except (ValueError, TypeError):
+        return []
+
+
+def _evidence_derivatives_indicators(
+    evidence: dict[str, object] | None,
+) -> DerivativesIndicators | None:
+    if not evidence:
+        return None
+    try:
+
+        def _dec(k: str) -> Decimal | None:
+            v = evidence.get(k)
+            return Decimal(str(v)) if v is not None else None
+
+        trend = evidence.get("funding_rate_trend")
+        return DerivativesIndicators(
+            funding_rate=_dec("funding_rate"),
+            funding_rate_trend=str(trend) if trend is not None else None,
+            open_interest=_dec("open_interest"),
+            oi_change_1h_pct=_dec("oi_change_1h_pct"),
+            long_short_ratio=_dec("long_short_ratio"),
+            top_trader_ratio=_dec("top_trader_ratio"),
+            taker_buy_sell_ratio=_dec("taker_buy_sell_ratio"),
+        )
+    except (ValueError, TypeError):
+        return None
+
+
+ROLES_METADATA = {
+    "technical": "Chuyên viên Kỹ thuật (4H / Daily)",
+    "derivatives": "Chuyên viên Phái sinh (Binance Futures)",
+    "news": "Chuyên viên Tin tức & Vĩ mô",
+    "liquidity": "Chuyên viên Thanh khoản & Sổ lệnh",
+    "bull_round_2": "Tranh biện Bull (Phe Mua)",
+    "bear_round_2": "Tranh biện Bear (Phe Bán)",
+}
+
+
+def _build_committee_evaluation(
+    run: dict[str, object] | None,
+) -> DashboardCommitteeEvaluation | None:
+    if not run:
+        return None
+
+    report_dir = Path(str(run.get("report_dir", "")))
+    analysts_file = report_dir / "analysts.json"
+
+    if analysts_file.exists():
+        try:
+            analysts = json.loads(analysts_file.read_text())
+            bull_w = Decimal("0")
+            bear_w = Decimal("0")
+            neut_w = Decimal("0")
+            votes: list[DashboardMemberVote] = []
+
+            for rk, rlabel in ROLES_METADATA.items():
+                rep = analysts.get(rk)
+                if isinstance(rep, dict):
+                    st = str(rep.get("stance", "neutral")).lower()
+                    cf = Decimal(str(rep.get("confidence", "5")))
+                    obs = rep.get("observations", [])
+                    lead_obs = (
+                        obs[0] if obs else (rep.get("risks", [""])[0] if rep.get("risks") else "")
+                    )
+                    votes.append(
+                        DashboardMemberVote(
+                            role=rk,
+                            label=rlabel,
+                            stance=st,
+                            confidence=cf,
+                            summary=str(lead_obs)[:220],
+                        )
+                    )
+                    if st == "bullish":
+                        bull_w += cf
+                    elif st == "bearish":
+                        bear_w += cf
+                    else:
+                        neut_w += cf
+
+            total_dir = bull_w + bear_w
+            long_pct = int(round((bull_w / total_dir) * 100)) if total_dir > 0 else 50
+            short_pct = 100 - long_pct
+
+            total_all = bull_w + bear_w + neut_w
+            neutral_pct = int(round((neut_w / total_all) * 100)) if total_all > 0 else 0
+
+            if long_pct >= 60:
+                rec = "LONG"
+                summary = f"Hội đồng đồng thuận nghiêng về vị thế LONG ({long_pct}%). Lực mua chủ động và tín hiệu kỹ thuật/phái sinh chiếm ưu thế."
+            elif short_pct >= 60:
+                rec = "SHORT"
+                summary = f"Hội đồng đồng thuận nghiêng về vị thế SHORT ({short_pct}%). Lực bán chủ động, cản kỹ thuật hoặc tin tức vĩ mô chiếm ưu thế."
+            else:
+                rec = "NEUTRAL"
+                summary = f"Hội đồng đánh giá thị trường CÂN BẰNG (Long {long_pct}% / Short {short_pct}%). Tín hiệu giữa các chuyên viên đang phân kỳ, khuyến nghị thận trọng."
+
+            return DashboardCommitteeEvaluation(
+                recommendation=rec,
+                long_pct=long_pct,
+                short_pct=short_pct,
+                neutral_pct=neutral_pct,
+                summary=summary,
+                member_votes=votes,
+            )
+        except Exception:
+            pass
+
+    decision = run.get("decision")
+    if isinstance(decision, dict):
+        bias = str(decision.get("futures_bias", "NEUTRAL")).upper()
+        if bias == "BULLISH":
+            rec = "LONG"
+            long_pct = 70
+            short_pct = 30
+            summary = "Hội đồng đánh giá thiên hướng TĂNG (Long 70% / Short 30%)."
+        elif bias == "BEARISH":
+            rec = "SHORT"
+            long_pct = 30
+            short_pct = 70
+            summary = "Hội đồng đánh giá thiên hướng GIẢM (Long 30% / Short 70%)."
+        else:
+            rec = "NEUTRAL"
+            long_pct = 50
+            short_pct = 50
+            summary = "Hội đồng đánh giá thị trường TRUNG LẬP / CÂN BẰNG (Long 50% / Short 50%)."
+
+        return DashboardCommitteeEvaluation(
+            recommendation=rec,
+            long_pct=long_pct,
+            short_pct=short_pct,
+            neutral_pct=0,
+            summary=summary,
+            member_votes=[],
+        )
+
+    return None
 
 
 def _build_health(
@@ -320,12 +632,24 @@ def build_dashboard_snapshot(
     deployed_pct = gross_exposure_usdt / nav_usdt * 100 if nav_usdt > 0 else Decimal("0")
 
     (
+        assets,
         configured_positions,
         external_assets_count,
         external_value_usdt,
         unpriced_assets_count,
         priced_by_symbol,
     ) = _split_positions(raw_positions, settings, nav_usdt)
+    if free_usdt > 0:
+        assets.insert(
+            0,
+            CurrentAsset(
+                asset=settings.base_currency,
+                quantity=free_usdt,
+                mark=Decimal("1"),
+                value=free_usdt,
+                state="cash",
+            ),
+        )
 
     portfolio = PortfolioSection(
         as_of=as_of,
@@ -334,6 +658,7 @@ def build_dashboard_snapshot(
         gross_exposure_usdt=gross_exposure_usdt,
         deployed_pct=deployed_pct,
         open_orders_count=open_orders_count,
+        assets=assets,
         configured_positions=configured_positions,
         external_assets_count=external_assets_count,
         external_value_usdt=external_value_usdt,
@@ -362,12 +687,16 @@ class DashboardPublishError(RuntimeError):
     """
 
 
+def is_loopback_url(url: str) -> bool:
+    return urlparse(url).hostname in _LOOPBACK_HOSTS
+
+
 def publish_dashboard(
     snapshot: DashboardSnapshot,
     *,
     url: str,
     ingest_token: str,
-    sites_bypass_token: str,
+    sites_bypass_token: str | None,
     client: httpx.Client | None = None,
 ) -> None:
     body = json.dumps(
@@ -381,8 +710,9 @@ def publish_dashboard(
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {ingest_token}",
-        "OAI-Sites-Authorization": f"Bearer {sites_bypass_token}",
     }
+    if sites_bypass_token:
+        headers["OAI-Sites-Authorization"] = f"Bearer {sites_bypass_token}"
     owns_client = client is None
     active = client if client is not None else httpx.Client(timeout=10)
     try:
@@ -416,10 +746,11 @@ def publish_dashboard_from_env(snapshot: DashboardSnapshot, *, strict: bool) -> 
         for name, value in (
             (DASHBOARD_INGEST_URL_ENV, url),
             (DASHBOARD_INGEST_TOKEN_ENV, ingest_token),
-            (SITES_BYPASS_TOKEN_ENV, sites_bypass_token),
         )
         if not value
     ]
+    if url and not is_loopback_url(url) and not sites_bypass_token:
+        missing.append(SITES_BYPASS_TOKEN_ENV)
     if missing:
         if strict:
             raise DashboardPublishError(

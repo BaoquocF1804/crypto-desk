@@ -37,7 +37,7 @@ The next version adds a CLI-like interaction surface without turning the browser
   - `reconcile <ticket_id>`
 - Process all commands through one global FIFO queue with no overlapping SQLite, LLM, or Binance work.
 - Show durable command state as `QUEUED → RUNNING → SUCCEEDED/FAILED`, with `NEEDS_REVIEW` for uncertain recovery.
-- Record the authenticated operator email for every command and state transition.
+- Record the authenticated operator email for every command.
 - Prevent duplicate execution across double-clicks, HTTP retries, browser reloads, process restarts, and lost result acknowledgements.
 - Keep the dashboard readable when command execution is disabled or unavailable.
 
@@ -63,8 +63,9 @@ The next version adds a CLI-like interaction surface without turning the browser
 - Audit identity: derive operator email from the trusted Sites identity header; never accept it from browser JSON.
 - Runner idle poll interval: approximately 2 seconds.
 - Runner offline threshold: 30 seconds without a valid heartbeat.
-- Preview lifetime: 5 minutes.
-- Command and event retention: 30 days.
+- Preview lifetime: 5 minutes, enforced by Sites at Confirm submission time.
+- Command retention: 30 days.
+- Clock authority: all time comparisons (heartbeat, lease, preview expiry, retention) use the Sites server clock. Runner and browser clocks are never authoritative.
 - Mainnet: hard-disabled for all web-originated execution commands.
 
 ## 5. Architecture
@@ -72,7 +73,7 @@ The next version adds a CLI-like interaction surface without turning the browser
 ```mermaid
 flowchart LR
     B["Private browser<br/>Dashboard + command dock"] -->|"same-origin authenticated API"| W["Sites command API"]
-    W --> Q["D1 FIFO queue<br/>commands + events + runner heartbeat"]
+    W --> Q["D1 FIFO queue<br/>commands + runner heartbeat"]
     R["Local Python runner"] -->|"outbound poll with two auth layers"| W
     W -->|"claim one typed command"| R
     R --> D["CommandDispatcher"]
@@ -125,7 +126,7 @@ The current monolithic `web/app/page.tsx` should be split only along these new r
 
 - **Command models:** mirror the Sites command contract using Pydantic models with `extra="forbid"`.
 - **CommandDispatcher:** maps a typed command to existing `CryptoDeskService`, `ExecutionService`, and store calls. It never invokes Typer, a subprocess, or a shell.
-- **Safe result serializers:** return per-command result models and recursively reject sensitive key fragments before transport.
+- **Safe result serializers:** return per-command result models and recursively reject forbidden keys (exact match, Section 6.2) before transport.
 - **Local command journal:** records the remote command ID, canonical argument hash, lifecycle, and safe terminal result around local execution.
 - **Command runner:** owns polling, singleton runner identity, heartbeat/lease renewal, dispatch, terminal reporting, and restart recovery.
 
@@ -175,18 +176,18 @@ Each D1 command contains:
 - fixed target environment `testnet`;
 - unique idempotency key scoped to the operator;
 - optional preview command ID;
-- queued, started, lease, and terminal timestamps;
+- queued, started, lease, and terminal timestamps, all stamped by Sites;
 - status;
 - safe result or safe error code;
 - bounded attempt/report metadata.
 
-Browser requests may supply an idempotency key but never a command ID, operator identity, target environment, runner identity, status, or result.
+Browser requests must supply an idempotency key (a UUID generated once per user action) and never a command ID, operator identity, target environment, runner identity, status, or result. Requests without an idempotency key are rejected before enqueue.
 
 ### 6.2 Safe results
 
 Each command kind has an explicit result schema. Generic stdout/stderr is not a result type.
 
-Results must not contain keys matching sensitive fragments including:
+Results must not contain any key from the forbidden list, matched exactly (case-insensitive) and checked recursively through nested objects and arrays. Substring/fragment matching is not used — it false-positives on legitimate keys (`raw` vs `drawdown`, `token` vs `token_count`). The initial forbidden list:
 
 - `api_key`
 - `api_secret`
@@ -215,22 +216,12 @@ Stores the current durable state for each command:
 - runner lease metadata;
 - preview reference;
 - safe result/error;
-- timestamps.
+- queued, started, terminal, and lease timestamps;
+- safe terminal reason code.
 
 The unique `(operator_email, idempotency_key)` constraint returns the existing command when the browser retries.
 
-#### `desk_command_events`
-
-Append-only audit transitions for 30 days:
-
-- command ID;
-- monotonically increasing sequence;
-- previous and next status;
-- event time;
-- operator or runner source;
-- safe reason code.
-
-Events do not duplicate argument/result bodies.
+This row is also the audit record: operator email, every lifecycle timestamp, terminal status, and reason code live here. There is no separate append-only event table; per-transition history beyond these timestamps is not required for a single-runner queue with 30-day retention.
 
 #### `desk_runner_state`
 
@@ -239,7 +230,6 @@ A singleton row contains:
 - runner session ID;
 - last heartbeat;
 - active command ID;
-- queue capability version;
 - local execution mode (`TESTNET_ORDER` or `DRY_RUN`);
 - safe runner state.
 
@@ -249,9 +239,9 @@ The UI considers the runner offline after 30 seconds without a valid heartbeat.
 
 The runner API atomically changes the oldest `QUEUED` command to `RUNNING`, ordered by `queued_at` and command ID, only when no other command is active.
 
-A runner session is singleton. A second session cannot claim work while the current session or an unresolved active command exists.
+A runner session is singleton. A second session cannot claim work while the current session holds an unexpired lease or an unresolved active command exists.
 
-The API never changes an expired `RUNNING` command back to `QUEUED`. Runner restart recovery must first resolve the active local journal record.
+The API never changes an expired `RUNNING` command back to `QUEUED` — a possibly-started command is never re-executed automatically. Instead, when a `RUNNING` command's lease has been expired for longer than the runner-offline threshold, Sites moves it to `NEEDS_REVIEW` with reason `LEASE_EXPIRED`. This resolves the active command, so a permanently dead runner cannot wedge the queue: a new runner session can register and claim the next command. Runner restart recovery must still resolve the active local journal record first (Section 8).
 
 ### 7.3 State machine
 
@@ -263,7 +253,9 @@ QUEUED → RUNNING → SUCCEEDED
 
 Legal transitions are enforced in the queue repository. Terminal states cannot return to `QUEUED` or `RUNNING`.
 
-`NEEDS_REVIEW` means local execution may have crossed a side-effect boundary and must not be repeated automatically. The operator can inspect the safe context and issue a new `reconcile` flow.
+`RUNNING → NEEDS_REVIEW` is set by the runner (uncertain local execution) or by Sites (lease expired past the runner-offline threshold, reason `LEASE_EXPIRED`).
+
+`NEEDS_REVIEW` means local execution may have crossed a side-effect boundary and must not be repeated automatically. The operator can inspect the safe context and issue a new `reconcile` flow. A late terminal report from a runner for a command already in `NEEDS_REVIEW` is recorded in the local journal but does not change the terminal state.
 
 ## 8. Local Command Journal and Exactly-Once Effects
 
@@ -308,12 +300,13 @@ Existing `ExecutionService` safeguards remain authoritative, including ticket st
    - entry, stop, and target where applicable;
    - creation and expiration time;
    - current submission state for reconciliation.
-5. The preview result contains a canonical ticket fingerprint and expires after 5 minutes.
-6. Confirm creates one idempotent execution command referencing the preview ID.
-7. The confirming email must equal the preview operator email.
-8. The runner rereads local state and validates the preview fingerprint, ticket status, TTL, environment, current account, quote, and risk constraints.
-9. Any mismatch fails closed with `PREVIEW_EXPIRED`, `TICKET_CHANGED`, or a more specific safe validation code.
-10. Only then does the dispatcher call the relevant `ExecutionService` method.
+5. The preview result contains a canonical ticket fingerprint. The preview expires 5 minutes after Sites records the preview result, measured on the Sites clock.
+6. Sites enforces expiry at Confirm submission: a confirm request for an expired preview is rejected with `PREVIEW_EXPIRED` and no execution command is created. Expiry is not re-checked later, so time spent waiting in the FIFO queue behind a long command cannot expire an already-accepted confirm; staleness after acceptance is caught by fingerprint revalidation instead.
+7. Confirm creates one idempotent execution command referencing the preview ID.
+8. The confirming email must equal the preview operator email.
+9. The runner rereads local state and validates the preview fingerprint, ticket status, TTL, environment, current account, quote, and risk constraints.
+10. Any mismatch fails closed with `TICKET_CHANGED` or a more specific safe validation code.
+11. Only then does the dispatcher call the relevant `ExecutionService` method.
 
 The preview clearly labels:
 
@@ -397,7 +390,7 @@ Limits:
 - at most 10 non-terminal commands per operator;
 - at most 100 non-terminal commands globally;
 - bounded command history query of 50 rows;
-- 30-day command/event retention;
+- 30-day command retention;
 - opportunistic bounded cleanup rather than unbounded delete work in a user request.
 
 ## 13. UI and Interaction
@@ -448,15 +441,17 @@ The browser receives stable safe codes and application-owned copy.
 | Runner offline | `RUNNER_OFFLINE`; no enqueue |
 | User/global queue limit | `429`; no enqueue |
 | Duplicate idempotency key | Return original command |
-| Preview expired | `FAILED: PREVIEW_EXPIRED` |
+| Missing idempotency key | Reject before enqueue |
+| Preview expired at Confirm submission | `PREVIEW_EXPIRED`; no enqueue |
 | Ticket changed | `FAILED: TICKET_CHANGED` |
+| `RUNNING` lease expired past runner-offline threshold | `NEEDS_REVIEW: LEASE_EXPIRED`; queue unblocked for a new runner session |
 | Mainnet or environment mismatch | `FAILED: ENVIRONMENT_FORBIDDEN` |
 | Failure before a possible side effect | `FAILED` with a safe category |
 | Possible broker side effect with uncertain acknowledgement | `NEEDS_REVIEW: EXECUTION_UNCERTAIN` |
 | D1 unavailable | No new execution; dashboard last-good behavior remains independent |
 | Browser/network interruption | Recover by command ID |
 
-Exceptions, request bodies, secret-bearing URLs, report paths, raw broker/LLM responses, stdout, and stderr never appear in API errors or D1 events.
+Exceptions, request bodies, secret-bearing URLs, report paths, raw broker/LLM responses, stdout, and stderr never appear in API errors or D1 rows.
 
 ## 15. Feature Flags and Kill Switches
 
@@ -485,7 +480,7 @@ Mainnet web execution is not a feature flag. It is absent from the command contr
   - restart from `RUNNING`;
   - result-report retry.
 - Mainnet hard-lock tests at command, runner, dispatcher, ticket, broker, and settings boundaries.
-- Preview TTL/fingerprint/operator tests.
+- Preview fingerprint/operator tests (preview expiry itself is enforced and tested on the Sites side).
 - `approve`, `reject`, and `reconcile` tests with fake brokers, including ambiguous submission and `NEEDS_REVIEW`.
 - Runner protocol tests with `httpx.MockTransport`.
 
@@ -497,24 +492,21 @@ Mainnet web execution is not a feature flag. It is absent from the command contr
 - Singleton runner session and heartbeat tests.
 - Legal and illegal state transition tests.
 - Lease renewal and unresolved active command tests.
-- Preview creation/confirm identity/expiry tests.
+- Lease-expiry tests: expired `RUNNING` command becomes `NEEDS_REVIEW: LEASE_EXPIRED`, is never requeued, and a new runner session can then claim work.
+- Preview creation/confirm identity tests, and expiry enforced at Confirm submission time on the Sites clock.
 - Result cap and recursive forbidden-key tests.
 - Retention cleanup tests.
 - Backward-compatible dashboard API tests.
 
 ### 16.3 Browser UI
 
-Pure Node tests cover parser, autocomplete, reducers, and status formatting. Add Playwright as a development-only dependency for:
+Pure Node tests cover parser, autocomplete, reducers, status formatting, reload-recovery state, and runner-offline disabling logic. Add Playwright as a development-only dependency for the money-path interactions only:
 
-- keyboard history/autocomplete;
-- command submission and FIFO display;
-- reload recovery;
-- runner-offline disabling;
-- preview focus trap and focus restoration;
 - double-click Confirm idempotency;
-- visible execution mode;
-- accessible status announcements;
-- immediate dashboard refresh after successful mutation.
+- preview focus trap and focus restoration;
+- visible execution mode (`TESTNET ORDER` vs `DRY RUN`) in the preview dialog.
+
+Remaining UI behavior is covered by the Node tests; expand Playwright coverage only if those prove insufficient.
 
 Tests use fake Worker/D1/runner responses and never real trading credentials.
 
@@ -539,8 +531,9 @@ Root and `web/` changes are committed and verified separately. No deployment occ
 - Browser reload retains active and terminal command state.
 - Execution actions require a fresh preview and one Confirm click.
 - Double-click or HTTP retry creates at most one local effect.
-- Preview confirmation fails if the ticket changes or expires.
+- An expired preview is rejected at Confirm submission; a changed ticket fails closed at execution.
 - Runner restart never automatically repeats a command left `RUNNING`.
+- A permanently dead runner cannot wedge the queue: lease expiry moves the active command to `NEEDS_REVIEW` and a new runner session can claim work.
 - Uncertain execution becomes `NEEDS_REVIEW`, not an automatic retry.
 - Testnet execution uses the authenticated email as the immutable audit actor.
 - All web-originated mainnet execution attempts fail closed.

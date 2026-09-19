@@ -371,3 +371,26 @@ def test_runner_sends_both_auth_headers(tmp_path):
     runner.heartbeat()
     assert captured["authorization"] == "Bearer runner-token"
     assert captured["oai-sites-authorization"] == "Bearer bypass-token"
+
+
+def test_local_runner_omits_empty_sites_header(tmp_path):
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(dict(request.headers))
+        return httpx.Response(200, json={"ok": True})
+
+    settings = Settings(database=tmp_path / "c.sqlite3", artifacts=tmp_path / "a")
+    runner = CommandRunner(
+        settings,
+        base_url="http://localhost:3001/api",
+        runner_token="runner-token",
+        sites_bypass_token="",
+        dispatcher=FakeDispatcher(),
+        transport=httpx.MockTransport(handler),
+        session_id="session-1",
+    )
+
+    runner.heartbeat()
+
+    assert "oai-sites-authorization" not in captured

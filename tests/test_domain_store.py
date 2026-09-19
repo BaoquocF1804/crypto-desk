@@ -185,6 +185,19 @@ def test_schedule_bucket_and_reflection_are_idempotent(tmp_path: Path):
     assert not store.save_reflection("run-1", "BTCUSDT", {"return": Decimal("0.10")})
 
 
+def test_unreflected_runs_returns_only_due_rows(tmp_path: Path):
+    store = Store(tmp_path / "crypto.db")
+    decision = make_decision(evidence_ids=("evidence-1",))
+    store.save_run("due", "2026-06-01T00:15:00+00:00", decision, Path("artifacts/due"))
+    store.save_run("future", "2026-07-01T00:15:00+00:00", decision, Path("artifacts/future"))
+    store.save_reflection("done", "BTCUSDT", {"realized_return": Decimal("0.05")})
+    store.save_run("done", "2026-05-01T00:15:00+00:00", decision, Path("artifacts/done"))
+
+    rows = store.unreflected_runs("2026-06-30T00:15:00+00:00")
+
+    assert [row["id"] for row in rows] == ["due"]
+
+
 def make_decision(*, evidence_ids: tuple[str, ...] = (), action: str = "HOLD") -> ResearchDecision:
     return ResearchDecision(
         symbol="BTCUSDT",

@@ -8,3 +8,8 @@ data/
 artifacts/
 .openbb_platform/
 .worktrees/
+vertex-key*.json
+*key*.json
+.codegraph/
+.superpowers/
+web/

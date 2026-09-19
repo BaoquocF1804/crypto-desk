@@ -3,4 +3,5 @@ set -euo pipefail
 
 script_path=$(readlink -f "$0")
 root=$(cd -- "$(dirname -- "$script_path")/.." && pwd)
+cd "$root"
 exec "$root/.venv/bin/desk" --config "$root/config.yaml" "$@"

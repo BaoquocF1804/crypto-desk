@@ -2,12 +2,13 @@ base_currency: USDT
 database: data/crypto_desk.sqlite3
 artifacts: artifacts/crypto
 
-symbols: [BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT]
+symbols: [BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, SUIUSDT]
 coingecko_ids:
   BTCUSDT: bitcoin
   ETHUSDT: ethereum
   BNBUSDT: binancecoin
   SOLUSDT: solana
+  SUIUSDT: sui
 # analyze/daily yêu cầu ít nhất một RSS feed có tin trong 48 giờ gần nhất;
 # để trống news_feeds thì mọi phiên phân tích sẽ trả về NO_TRADE.
 # Ví dụ (chú ý: không có dấu "/" cuối URL CoinDesk — bản có "/" trả HTTP 308):
@@ -17,8 +18,13 @@ coingecko_ids:
 news_feeds: []
 
 models:
-  quick: gpt-5.4-mini
-  deep: gpt-5.5
+  # provider hỗ trợ: gemini (AI Studio hoặc Vertex AI), vertexai, hoặc openai
+  # Với Vertex AI: có thể dùng gemini-2.5-flash, gemini-2.0-flash, gemini-1.5-flash, v.v.
+  provider: gemini
+  quick: gemini-3.6-flash
+  deep: gemini-3.6-flash
+  quick_thinking: low
+  deep_thinking: high
   debate_rounds: 2
 
 risk:

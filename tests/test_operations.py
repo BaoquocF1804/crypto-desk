@@ -53,7 +53,7 @@ def test_hermes_skill_maps_telegram_identity_and_confirmation_code_separately() 
 def test_hermes_skill_limits_symbols_and_public_commands() -> None:
     skill = (ROOT / "hermes" / "crypto-desk" / "SKILL.md").read_text(encoding="utf-8")
 
-    assert "BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT" in skill
+    assert "BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, SUIUSDT" in skill
     for command in (
         "doctor",
         "sync",

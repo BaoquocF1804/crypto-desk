@@ -1,20 +1,23 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import crypto_desk.cli as cli
 import httpx
 from typer.testing import CliRunner
 
 from crypto_desk.broker import SpotQuote
-from crypto_desk.cli import _hermes_installed, app, doctor_report
-from crypto_desk.config import Settings
+from crypto_desk.cli import _hermes_installed, _structured_client, app, doctor_report
+from crypto_desk.committee import GeminiStructuredClient, OpenAIStructuredClient
+from crypto_desk.config import ModelSettings, Settings
 from crypto_desk.data import EvidenceError, EvidenceSnapshot
 from crypto_desk.domain import (
     EvidenceItem,
+    FuturesTradeSetup,
     PortfolioSnapshot,
     ResearchDecision,
     SymbolRules,
@@ -81,25 +84,44 @@ class FakeBuilder:
         self.error = error
         self.calls: list[str] = []
 
-    def build(self, symbol: str, cutoff: datetime) -> EvidenceSnapshot:
+    def build(
+        self,
+        symbol: str,
+        cutoff: datetime,
+        *,
+        live: bool = False,
+    ) -> EvidenceSnapshot:
         self.calls.append(symbol)
         if self.error:
             raise EvidenceError(self.error)
         return make_snapshot(symbol)
 
+    def reflection_closes(
+        self,
+        symbol: str,
+        start: datetime,
+        periods: int = 20,
+    ) -> tuple[Decimal, ...]:
+        del start
+        base = Decimal("100") if symbol == "BTCUSDT" else Decimal("50")
+        return tuple(base + index for index in range(periods))
+
 
 class FakeCommittee:
     def __init__(self):
         self.calls = 0
+        self.last_prior_thesis = None
 
     def run(
         self,
         snapshot: EvidenceSnapshot,
         reflections=(),
+        prior_thesis=None,
         *,
         position_quantity=Decimal("0"),
     ):
         self.calls += 1
+        self.last_prior_thesis = prior_thesis
         decision = ResearchDecision(
             symbol=snapshot.symbol,
             action="ACCUMULATE",
@@ -337,12 +359,16 @@ def test_analyze_writes_complete_artifact_set_and_store_record(tmp_path):
     for name in (
         "evidence.json",
         "analysts.json",
+        "llm.json",
         "decision.json",
         "report.md",
     ):
         assert (result.report_dir / name).is_file()
     decision = json.loads((result.report_dir / "decision.json").read_text(encoding="utf-8"))
+    llm = json.loads((result.report_dir / "llm.json").read_text(encoding="utf-8"))
     assert decision["entry"] == "100.00"
+    assert llm["provider"] == "gemini"
+    assert llm["calls"] == []
     assert store.latest_run("BTCUSDT")["id"] == result.run_id
     assert result.ticket_id is not None
     assert store.ticket(result.ticket_id).status == "PENDING"
@@ -585,7 +611,67 @@ def test_health_flags_unpriced_positions(tmp_path: Path):
 
     result = service.health()
 
-    assert "unpriced_asset:AIRDROP" in result["alerts"]
+    # Unpriced dust is aggregated into one count, never one alert per asset.
+    assert "unpriced_assets:1" in result["alerts"]
+    assert not any(a.startswith("unpriced_asset:") for a in result["alerts"])
+
+
+def test_health_aggregates_external_assets_instead_of_per_symbol_spam(tmp_path: Path):
+    class DustBroker(FakeBroker):
+        def account_snapshot(self) -> PortfolioSnapshot:
+            external = tuple(
+                {
+                    "asset": f"DUST{i}",
+                    "symbol": f"DUST{i}USDT",
+                    "free": "10",
+                    "locked": "0",
+                    "total": "10",
+                    "mid_usdt": "1",
+                    "value_usdt": "10",
+                }
+                for i in range(3)
+            )
+            unpriced = (
+                {
+                    "asset": "AIRDROP",
+                    "symbol": "AIRDROPUSDT",
+                    "free": "5",
+                    "locked": "0",
+                    "total": "5",
+                    "mid_usdt": "0",
+                    "value_usdt": "0",
+                    "unpriced": True,
+                },
+            )
+            return PortfolioSnapshot(
+                environment="testnet",
+                nav_usdt=Decimal("10000"),
+                free_usdt=Decimal("10000"),
+                positions=external + unpriced,
+                open_orders=(),
+                as_of=NOW.isoformat(),
+            )
+
+    settings = make_settings(tmp_path)
+    service = CryptoDeskService(
+        settings,
+        Store(settings.database),
+        broker=DustBroker(),
+        evidence_builder=FakeBuilder(),
+        committee=FakeCommittee(),
+        now=lambda: NOW,
+    )
+
+    result = service.health()
+    alerts = result["alerts"]
+
+    # Non-allowlist assets are counted, never expanded into per-symbol alerts.
+    assert "external_unmanaged:3" in alerts
+    assert "unpriced_assets:1" in alerts
+    assert not any(a.startswith("missing_protection:DUST") for a in alerts)
+    assert not any(a.startswith("missing_thesis:DUST") for a in alerts)
+    # And no analyze follow-up is triggered for unmanaged symbols.
+    assert result["run_ids"] == []
 
 
 def test_reflection_calculates_return_excursions_and_benchmark_alpha():
@@ -607,6 +693,52 @@ def test_reflection_calculates_return_excursions_and_benchmark_alpha():
     assert result["alpha"] == Decimal("0.05")
 
 
+def test_daily_schedules_due_reflections_once(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    report_dir = tmp_path / "old-run"
+    report_dir.mkdir()
+    (report_dir / "evidence.json").write_text(
+        json.dumps({"binance_mid": "100"}),
+        encoding="utf-8",
+    )
+    old_decision = ResearchDecision(
+        symbol="BTCUSDT",
+        action="HOLD",
+        conviction=Decimal("5"),
+        bull_case="Bull",
+        bear_case="Bear",
+        catalysts=(),
+        invalidation="Invalidation",
+        entry=None,
+        stop=None,
+        target=None,
+        evidence_ids=("evidence-1",),
+        reason="committee decision",
+    )
+    store.save_run(
+        "old-run",
+        (NOW - timedelta(days=21)).isoformat(),
+        old_decision,
+        report_dir,
+    )
+    service = CryptoDeskService(
+        settings,
+        store,
+        evidence_builder=FakeBuilder(),
+        committee=FakeCommittee(),
+        now=lambda: NOW,
+    )
+
+    result = service.daily(due=True)
+
+    assert result["reflection_run_ids"] == ["old-run"]
+    reflection = store.list_reflections("BTCUSDT")[0]
+    assert reflection["run_id"] == "old-run"
+    assert reflection["payload"]["decision_action"] == "HOLD"
+    assert reflection["payload"]["alpha"] == "0"
+
+
 def test_json_doctor_reports_secret_presence_without_values(
     tmp_path,
     monkeypatch,
@@ -615,6 +747,7 @@ def test_json_doctor_reports_secret_presence_without_values(
     config.write_text("symbols: [BTCUSDT]\n", encoding="utf-8")
     monkeypatch.setenv("BINANCE_TESTNET_API_KEY", "never-print-key")
     monkeypatch.setenv("BINANCE_TESTNET_API_SECRET", "never-print-secret")
+    monkeypatch.setenv("GEMINI_API_KEY", "never-print-gemini-key")
 
     result = CliRunner().invoke(
         app,
@@ -624,8 +757,93 @@ def test_json_doctor_reports_secret_presence_without_values(
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert payload["binance"]["credentials_present"] is True
+    assert payload["gemini"] == {
+        "active": True,
+        "key_present": True,
+        "online_smoke_requested": False,
+    }
     assert "never-print-key" not in result.stdout
     assert "never-print-secret" not in result.stdout
+    assert "never-print-gemini-key" not in result.stdout
+
+
+def test_provider_factory_selects_gemini_v1_or_openai(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeGeminiClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-key")
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+    monkeypatch.setattr(cli.genai, "Client", FakeGeminiClient)
+
+    gemini = _structured_client(Settings())
+
+    assert isinstance(gemini, GeminiStructuredClient)
+    assert captured == {
+        "api_key": "gemini-test-key",
+        "http_options": {"api_version": "v1"},
+    }
+
+    _structured_client(
+        Settings(
+            models=ModelSettings(
+                provider="gemini",
+                quick="gemini-3-flash-preview",
+                deep="gemini-3-flash-preview",
+            )
+        )
+    )
+    assert captured["http_options"] == {"api_version": "v1beta"}
+
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
+    openai = _structured_client(
+        Settings(
+            models=ModelSettings(
+                provider="openai",
+                quick="gpt-5.4-mini",
+                deep="gpt-5.5",
+            )
+        )
+    )
+
+    assert isinstance(openai, OpenAIStructuredClient)
+
+
+def test_provider_factory_selects_vertex_ai_when_credentials_provided(tmp_path: Path, monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeVertexClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    key_file = tmp_path / "vertex-key.json"
+    key_file.write_text('{"type": "service_account"}', encoding="utf-8")
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(key_file))
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project-123")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+    monkeypatch.setattr(cli.genai, "Client", FakeVertexClient)
+
+    client = _structured_client(
+        Settings(
+            models=ModelSettings(
+                provider="vertexai",
+                quick="gemini-2.5-flash",
+                deep="gemini-2.5-flash",
+            )
+        )
+    )
+
+    assert isinstance(client, GeminiStructuredClient)
+    assert captured == {
+        "vertexai": True,
+        "project": "test-project-123",
+        "location": "us-central1",
+    }
 
 
 def test_doctor_finds_hermes_in_user_local_bin_when_path_is_minimal(
@@ -704,9 +922,13 @@ def test_publish_dashboard_command_posts_snapshot_and_emits_published_status(
 
 def test_publish_dashboard_command_fails_clearly_when_env_var_missing(tmp_path: Path, monkeypatch):
     config = _write_config(tmp_path)
-    monkeypatch.delenv("CRYPTO_DESK_DASHBOARD_INGEST_URL", raising=False)
-    monkeypatch.delenv("CRYPTO_DESK_DASHBOARD_INGEST_TOKEN", raising=False)
-    monkeypatch.delenv("CRYPTO_DESK_SITES_BYPASS_TOKEN", raising=False)
+    # Force-empty (not delenv): the command calls load_dotenv(), which would
+    # otherwise repopulate these from a developer's real .env and mask the
+    # missing-config path. Empty strings are treated as missing and survive
+    # load_dotenv(override=False).
+    monkeypatch.setenv("CRYPTO_DESK_DASHBOARD_INGEST_URL", "")
+    monkeypatch.setenv("CRYPTO_DESK_DASHBOARD_INGEST_TOKEN", "")
+    monkeypatch.setenv("CRYPTO_DESK_SITES_BYPASS_TOKEN", "")
 
     result = CliRunner().invoke(app, ["--config", str(config), "publish-dashboard"])
 
@@ -844,6 +1066,8 @@ def test_dashboard_hook_does_not_fire_after_orders_reconcile_with_no_results(
     store = Store(tmp_path / "crypto.sqlite3")
     store.close()
     calls = _install_publish_hook_spy(monkeypatch)
+    monkeypatch.delenv("BINANCE_ENV", raising=False)
+    monkeypatch.setattr("crypto_desk.cli._execution_service", lambda settings: None)
 
     result = CliRunner().invoke(app, ["--config", str(config), "--json", "orders", "--reconcile"])
 
@@ -950,3 +1174,189 @@ def test_runner_command_requires_all_env_vars(
 
     assert result.exit_code == 2
     assert "CRYPTO_DESK_COMMAND_API_URL" in result.output
+
+
+def test_runner_command_allows_loopback_without_sites_bypass(tmp_path, monkeypatch):
+    config = _write_config(tmp_path)
+    monkeypatch.setenv("CRYPTO_DESK_COMMAND_API_URL", "http://localhost:3001/api")
+    monkeypatch.setenv("CRYPTO_DESK_RUNNER_TOKEN", "runner-token")
+    monkeypatch.setenv("CRYPTO_DESK_SITES_BYPASS_TOKEN", "")
+    captured: dict[str, Any] = {}
+
+    class FakeRunner:
+        def __init__(self, settings, **kwargs):
+            captured.update(kwargs)
+
+        def run_forever(self):
+            return None
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr("crypto_desk.cli.CommandRunner", FakeRunner)
+
+    result = CliRunner().invoke(app, ["--config", str(config), "runner"])
+
+    assert result.exit_code == 0
+    assert captured["sites_bypass_token"] == ""
+
+
+def test_markdown_report_includes_futures_setups_when_present(tmp_path: Path):
+    store = Store(tmp_path / "crypto.sqlite3")
+    settings = Settings(
+        database=tmp_path / "crypto.sqlite3",
+        artifacts=tmp_path / "artifacts",
+        symbols=("BTCUSDT",),
+    )
+    service = CryptoDeskService(store=store, settings=settings)
+    snapshot = make_snapshot("BTCUSDT")
+    decision = ResearchDecision(
+        symbol="BTCUSDT",
+        action="NO_TRADE",
+        conviction=Decimal("6.5"),
+        bull_case="Tăng tốt.",
+        bear_case="Cản mạnh.",
+        catalysts=(),
+        invalidation="Thủng hỗ trợ.",
+        entry=None,
+        stop=None,
+        target=None,
+        evidence_ids=("ev-1",),
+        reason="Hội đồng quan sát.",
+        futures_bias="BULLISH",
+        futures_setups=(
+            FuturesTradeSetup(
+                direction="LONG",
+                entry=Decimal("100000"),
+                stop=Decimal("98000"),
+                target=Decimal("105000"),
+                risk_reward_ratio=Decimal("2.5"),
+                rationale="Quét thanh lý Long xong bật tăng.",
+            ),
+            FuturesTradeSetup(
+                direction="SHORT",
+                entry=Decimal("105000"),
+                stop=Decimal("107000"),
+                target=Decimal("100000"),
+                risk_reward_ratio=Decimal("2.5"),
+                rationale="Kháng cự Daily.",
+            ),
+        ),
+    )
+    report = service._markdown_report(
+        decision=decision,
+        cutoff=NOW,
+        reports={},
+        snapshot=snapshot,
+    )
+    assert "Kịch bản giao dịch Phái sinh (Futures Setups — Tham khảo, Non-executing)" in report
+    assert "**Thiên hướng Futures (Bias):** **BULLISH**" in report
+    assert "100000" in report
+    assert "98000" in report
+    assert "105000" in report
+    assert "SHORT" in report
+    assert "LONG" in report
+
+
+def test_analyze_links_with_prior_valid_run(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    store.save_snapshot(
+        PortfolioSnapshot(
+            environment="testnet",
+            nav_usdt=Decimal("10000"),
+            free_usdt=Decimal("10000"),
+            positions=(),
+            open_orders=(),
+            as_of=NOW.isoformat(),
+        )
+    )
+    committee = FakeCommittee()
+    current_time = NOW
+    service = CryptoDeskService(
+        settings,
+        store,
+        evidence_builder=FakeBuilder(),
+        committee=committee,
+        now=lambda: current_time,
+    )
+
+    # First analyze run (no prior thesis)
+    run_1 = service.analyze("BTCUSDT")
+    assert run_1.decision.thesis_continuity == "NEW"
+    assert committee.last_prior_thesis is None
+
+    # Second analyze run 4 hours later
+    current_time = NOW + timedelta(hours=4)
+    run_2 = service.analyze("BTCUSDT")
+
+    assert committee.last_prior_thesis is not None
+    assert committee.last_prior_thesis["run_id"] == run_1.run_id
+    assert committee.last_prior_thesis["hours_ago"] == "4.0"
+    assert committee.last_prior_thesis["prior_price"] == "100"
+    assert committee.last_prior_thesis["current_price"] == "100"
+    assert committee.last_prior_thesis["action"] == "ACCUMULATE"
+
+    # Verify artifacts
+    assert (run_2.report_dir / "prior_thesis.json").is_file()
+    prior_json = json.loads((run_2.report_dir / "prior_thesis.json").read_text(encoding="utf-8"))
+    assert prior_json["run_id"] == run_1.run_id
+
+    report_text = (run_2.report_dir / "report.md").read_text(encoding="utf-8")
+    assert "## Đối soát Luận điểm Trước (Thesis Tracking)" in report_text
+    assert run_1.run_id in report_text
+
+
+def test_latest_valid_run_respects_before_cutoff(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+
+    t1 = NOW
+    t2 = NOW + timedelta(hours=2)
+    t3 = NOW + timedelta(hours=4)
+
+    decision_1 = ResearchDecision(
+        symbol="BTCUSDT",
+        action="ACCUMULATE",
+        conviction=Decimal("7"),
+        bull_case="Bull 1",
+        bear_case="Bear 1",
+        catalysts=(),
+        invalidation="Inv 1",
+        entry=Decimal("100"),
+        stop=Decimal("90"),
+        target=Decimal("120"),
+        evidence_ids=("ev1",),
+        reason="reason 1",
+    )
+    decision_2 = ResearchDecision(
+        symbol="BTCUSDT",
+        action="HOLD",
+        conviction=Decimal("6"),
+        bull_case="Bull 2",
+        bear_case="Bear 2",
+        catalysts=(),
+        invalidation="Inv 2",
+        entry=Decimal("105"),
+        stop=Decimal("95"),
+        target=Decimal("125"),
+        evidence_ids=("ev2",),
+        reason="reason 2",
+    )
+
+    store.save_run("run-1", t1.isoformat(), decision_1, tmp_path / "run-1")
+    store.save_run("run-2", t2.isoformat(), decision_2, tmp_path / "run-2")
+
+    # At t3, latest before t3 is run-2
+    latest_at_t3 = store.latest_valid_run("BTCUSDT", before_cutoff=t3.isoformat())
+    assert latest_at_t3 is not None
+    assert latest_at_t3["id"] == "run-2"
+
+    # At t2, latest strictly before t2 is run-1
+    latest_at_t2 = store.latest_valid_run("BTCUSDT", before_cutoff=t2.isoformat())
+    assert latest_at_t2 is not None
+    assert latest_at_t2["id"] == "run-1"
+
+    # Before t1, there is no prior run
+    latest_before_t1 = store.latest_valid_run("BTCUSDT", before_cutoff=t1.isoformat())
+    assert latest_before_t1 is None

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -12,7 +12,7 @@ from .domain import Environment
 
 TESTNET_URL = "https://testnet.binance.vision"
 MAINNET_URL = "https://api.binance.com"
-V1_SYMBOLS = frozenset({"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"})
+V1_SYMBOLS = frozenset({"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "SUIUSDT"})
 MAINNET_GRADUATION_CHAINS = 20
 HARD_MAINNET_CAP_USDT = Decimal("25")
 MAX_TICKET_TTL_MINUTES = 30
@@ -21,7 +21,23 @@ DEFAULT_COINGECKO_IDS = {
     "ETHUSDT": "ethereum",
     "BNBUSDT": "binancecoin",
     "SOLUSDT": "solana",
+    "SUIUSDT": "sui",
 }
+GEMINI_ALLOWED_MODELS = frozenset(
+    {
+        "gemini-3.8-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+        "gemini-3-flash-preview",
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+    }
+)
+ModelProvider = Literal["gemini", "openai", "vertexai"]
+ThinkingLevel = Literal["low", "high"]
 
 
 def _decimal(value: Any) -> Decimal:
@@ -41,8 +57,11 @@ class RiskSettings:
 
 @dataclass(frozen=True, slots=True)
 class ModelSettings:
-    quick: str = "gpt-5.4-mini"
-    deep: str = "gpt-5.5"
+    provider: ModelProvider = "gemini"
+    quick: str = "gemini-3.6-flash"
+    deep: str = "gemini-3.6-flash"
+    quick_thinking: ThinkingLevel = "low"
+    deep_thinking: ThinkingLevel = "high"
     debate_rounds: int = 2
 
 
@@ -62,7 +81,7 @@ class Settings:
     base_currency: str = "USDT"
     database: Path = Path("data/crypto_desk.sqlite3")
     artifacts: Path = Path("artifacts/crypto")
-    symbols: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT")
+    symbols: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "SUIUSDT")
     coingecko_ids: dict[str, str] = field(default_factory=lambda: DEFAULT_COINGECKO_IDS.copy())
     news_feeds: tuple[str, ...] = ()
     models: ModelSettings = field(default_factory=ModelSettings)
@@ -122,6 +141,18 @@ def _validate(settings: Settings) -> None:
         raise ValueError(f"ticket_ttl_minutes must be between 1 and {MAX_TICKET_TTL_MINUTES}")
     if settings.models.debate_rounds != 2:
         raise ValueError("V1 requires exactly two debate rounds")
+    if settings.models.provider not in {"gemini", "openai", "vertexai"}:
+        raise ValueError("models.provider must be gemini, openai, or vertexai")
+    if settings.models.quick_thinking not in {"low", "high"}:
+        raise ValueError("models.quick_thinking must be low or high")
+    if settings.models.deep_thinking not in {"low", "high"}:
+        raise ValueError("models.deep_thinking must be low or high")
+    selected_models = (settings.models.quick, settings.models.deep)
+    if settings.models.provider in {"gemini", "vertexai"}:
+        if any(model not in GEMINI_ALLOWED_MODELS for model in selected_models):
+            raise ValueError("Gemini models must be in the allowlist")
+    elif any(model.startswith("gemini-") for model in selected_models):
+        raise ValueError("Gemini models require models.provider=gemini or vertexai")
     if settings.binance.environment not in {"testnet", "mainnet"}:
         raise ValueError("binance.environment must be testnet or mainnet")
     if settings.schedule.daily_utc != "00:15" or settings.schedule.health_minutes != 15:
@@ -133,6 +164,7 @@ def load_settings(path: Path) -> Settings:
     base = path.parent
     symbols = tuple(str(item).upper() for item in raw.get("symbols", Settings().symbols))
     models_raw = raw.get("models", {})
+    model_defaults = ModelSettings()
     binance_raw = raw.get("binance", {})
     schedule_raw = raw.get("schedule", {})
     settings = Settings(
@@ -146,9 +178,16 @@ def load_settings(path: Path) -> Settings:
         },
         news_feeds=tuple(str(value) for value in raw.get("news_feeds", [])),
         models=ModelSettings(
-            quick=str(models_raw.get("quick", "gpt-5.4-mini")),
-            deep=str(models_raw.get("deep", "gpt-5.5")),
-            debate_rounds=int(models_raw.get("debate_rounds", 2)),
+            provider=str(models_raw.get("provider", model_defaults.provider)).lower(),
+            quick=str(models_raw.get("quick", model_defaults.quick)),
+            deep=str(models_raw.get("deep", model_defaults.deep)),
+            quick_thinking=str(
+                models_raw.get("quick_thinking", model_defaults.quick_thinking)
+            ).lower(),
+            deep_thinking=str(
+                models_raw.get("deep_thinking", model_defaults.deep_thinking)
+            ).lower(),
+            debate_rounds=int(models_raw.get("debate_rounds", model_defaults.debate_rounds)),
         ),
         risk=_load_risk(raw.get("risk", {})),
         binance=BinanceSettings(environment=str(binance_raw.get("environment", "testnet")).lower()),

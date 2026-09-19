@@ -46,7 +46,7 @@ class CommandRunner:
         *,
         base_url: str,
         runner_token: str,
-        sites_bypass_token: str,
+        sites_bypass_token: str | None,
         store: Store | None = None,
         dispatcher: CommandDispatcher | None = None,
         client: httpx.Client | None = None,
@@ -61,8 +61,9 @@ class CommandRunner:
         self.dispatcher = dispatcher if dispatcher is not None else CommandDispatcher(settings)
         headers = {
             "Authorization": f"Bearer {runner_token}",
-            "OAI-Sites-Authorization": (f"Bearer {sites_bypass_token}"),
         }
+        if sites_bypass_token:
+            headers["OAI-Sites-Authorization"] = f"Bearer {sites_bypass_token}"
         self.client = client or httpx.Client(
             base_url=base_url,
             headers=headers,

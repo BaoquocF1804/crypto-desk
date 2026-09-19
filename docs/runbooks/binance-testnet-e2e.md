@@ -8,14 +8,19 @@ redacted ID và trạng thái terminal quan sát được.
 
 | Hạng mục | Trạng thái | Bằng chứng |
 |---|---|---|
-| Automated offline suite | PASS | `pytest`, broker/execution fixtures |
-| Public endpoint doctor | PASS | 2026-07-17: Spot, derivatives public, CoinGecko OK |
-| Read-only online smoke | BLOCKED | Chưa có Testnet credentials trong worktree |
-| Một OTOCO lifecycle | NOT RUN | Cần read-only smoke đạt trước |
+| Automated offline suite | PASS | 2026-07-18: 243 tests, Ruff, format, web tests/build/lint |
+| Public endpoint doctor | PASS | 2026-07-18: Spot clock drift 173 ms; Spot, Futures, CoinGecko, RSS, Gemini OK |
+| Read-only online smoke | PASS | 2026-07-18: `sync`, `screen`, `analyze BTCUSDT`; run `f90cac25…`; local snapshot published |
+| Một OTOCO lifecycle | BLOCKED | Risk fail-closed trước submit: 25 unpriced assets, gross > 80%, reserve < 20% |
 | Failure-path online checks | NOT RUN | Cần Testnet execution |
 | Restart idempotency | NOT RUN | Cần một order chain Testnet |
 
 `BLOCKED` hoặc `NOT RUN` không được diễn giải thành thành công.
+
+Lần chạy 2026-07-18 không gửi authenticated order nào. Testnet credentials và
+execution flag đều hợp lệ, nhưng account bootstrap của Spot Testnet không đáp ứng
+portfolio guard của ứng dụng. Không được bỏ qua guard hoặc submit trực tiếp qua
+broker chỉ để đổi trạng thái runbook thành `PASS`.
 
 ## Điều kiện trước khi chạy
 

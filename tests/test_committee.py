@@ -5,17 +5,57 @@ from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from crypto_desk.committee import (
     AnalystReport,
     CryptoCommittee,
+    FuturesSetupModel,
+    GeminiStructuredClient,
     ManagerDecision,
     OpenAIStructuredClient,
+    ProviderError,
+    StructuredOutputError,
 )
 from crypto_desk.data import EvidenceSnapshot
 from crypto_desk.domain import EvidenceItem, SymbolRules
 
 
 def valid_snapshot() -> EvidenceSnapshot:
+    payloads = {
+        "spot": {
+            "symbol": "BTCUSDT",
+            "mid": "100000",
+            "spread": "0.0002",
+            "quote_volume": "750000000",
+            "change_24h_pct": "1.5",
+            "daily_closes": ["90000", "100000"],
+            "four_hour_closes": ["98000", "100000"],
+            "depth": {"bids": [["99999", "1"]], "asks": [["100001", "1"]]},
+            "rules": {"tick_size": "0.01"},
+        },
+        "news": {
+            "symbol": "BTCUSDT",
+            "items": [
+                {
+                    "title": "Current Bitcoin headline",
+                    "url": "https://example.test/news",
+                    "published_at": "2026-07-17T00:00:00+00:00",
+                    "content_hash": "news-hash",
+                }
+            ],
+        },
+        "derivatives": {
+            "symbol": "BTCUSDT",
+            "funding_rate": "0.0001",
+            "open_interest": "120000",
+        },
+        "reference": {
+            "symbol": "BTCUSDT",
+            "reference_usdt": "100000",
+            "deviation": "0",
+        },
+    }
     items = tuple(
         EvidenceItem.create(
             kind=kind,
@@ -25,14 +65,9 @@ def valid_snapshot() -> EvidenceSnapshot:
             as_of="2026-07-17T00:15:00+00:00",
             delayed=False,
             stale=False,
-            payload={"symbol": "BTCUSDT", "value": value},
+            payload=payloads[kind],
         )
-        for kind, value in (
-            ("spot", "100000"),
-            ("news", "current"),
-            ("derivatives", "0.0001"),
-            ("reference", "100000"),
-        )
+        for kind in ("spot", "news", "derivatives", "reference")
     )
     return EvidenceSnapshot(
         symbol="BTCUSDT",
@@ -63,6 +98,7 @@ class FakeLLM:
     def __init__(self):
         self.calls: list[str] = []
         self.models: list[str] = []
+        self.requests: list[dict[str, Any]] = []
         self.invalid_for: set[str] = set()
         self.unknown_evidence_for: set[str] = set()
 
@@ -71,12 +107,20 @@ class FakeLLM:
         *,
         stage: str,
         model: str,
+        thinking: str,
         response_model: type,
         system_prompt: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         self.calls.append(stage)
         self.models.append(model)
+        self.requests.append(
+            {
+                "stage": stage,
+                "system_prompt": system_prompt,
+                "payload": payload,
+            }
+        )
         if stage in self.invalid_for:
             return {"invalid": True}
         evidence_ids = payload["evidence_ids"]
@@ -125,10 +169,56 @@ def test_committee_runs_specialists_before_exactly_two_debate_rounds():
         "bear_round_2",
         "manager",
     ]
-    assert fake_llm.models[:4] == ["gpt-5.4-mini"] * 4
-    assert fake_llm.models[4:] == ["gpt-5.5"] * 5
+    assert fake_llm.models == ["gemini-3.6-flash"] * 9
     assert result.decision.evidence_ids == snapshot.evidence_ids
     assert result.decision.action == "ACCUMULATE"
+    assert result.decision.reason == "Quyết định của hội đồng."
+
+
+def test_committee_prompts_require_vietnamese_and_isolate_specialists():
+    fake_llm = FakeLLM()
+
+    CryptoCommittee(fake_llm).run(valid_snapshot())
+
+    requests = {request["stage"]: request for request in fake_llm.requests}
+    assert all(
+        "bằng tiếng Việt có dấu" in request["system_prompt"]
+        and "dữ liệu không đáng tin cậy" in request["system_prompt"]
+        for request in requests.values()
+    )
+
+    expected = {
+        "technical": {
+            "symbol",
+            "mid",
+            "change_24h_pct",
+            "daily_closes",
+            "four_hour_closes",
+        },
+        "liquidity": {
+            "symbol",
+            "mid",
+            "spread",
+            "quote_volume",
+            "depth",
+            "rules",
+        },
+        "news": {"symbol", "items"},
+        "derivatives": {"symbol", "funding_rate", "open_interest"},
+    }
+    for role, fields in expected.items():
+        payload = requests[role]["payload"]
+        evidence = payload["snapshot"]["evidence"]
+        assert set(evidence["payload"]) == fields
+        assert payload["evidence_ids"] == [evidence["id"]]
+        assert "reports" not in payload
+        assert "reflections" not in payload
+        assert "position_quantity" not in payload
+
+    assert requests["bull_round_1"]["payload"]["round_number"] == 1
+    assert requests["bear_round_2"]["payload"]["round_number"] == 2
+    assert requests["manager"]["payload"]["stage"] == "manager"
+    assert requests["manager"]["payload"]["position_quantity"] == "0"
 
 
 def test_invalid_manager_schema_retries_once_then_no_trade():
@@ -292,6 +382,7 @@ def test_openai_adapter_uses_responses_parse_without_tools():
     parsed = OpenAIStructuredClient(SimpleNamespace(responses=Responses())).generate(
         stage="technical",
         model="gpt-5.4-mini",
+        thinking="low",
         response_model=AnalystReport,
         system_prompt="Bounded role",
         payload={"evidence_ids": ["evidence-1"]},
@@ -299,9 +390,289 @@ def test_openai_adapter_uses_responses_parse_without_tools():
 
     assert parsed.stance == "neutral"
     assert captured["model"] == "gpt-5.4-mini"
+    assert captured["reasoning"] == {"effort": "low"}
     assert captured["text_format"] is AnalystReport
     assert "tools" not in captured
     assert captured["input"][0] == {
         "role": "system",
         "content": "Bounded role",
     }
+
+
+def test_gemini_adapter_uses_json_schema_without_server_storage():
+    captured: dict[str, Any] = {}
+
+    class Interactions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                output_text=(
+                    '{"stance":"neutral","confidence":"5",'
+                    '"observations":["Không có lợi thế rõ ràng."],'
+                    '"risks":[],"evidence_ids":["evidence-1"]}'
+                )
+            )
+
+    parsed = GeminiStructuredClient(SimpleNamespace(interactions=Interactions())).generate(
+        stage="technical",
+        model="gemini-3.6-flash",
+        thinking="low",
+        response_model=AnalystReport,
+        system_prompt="Bounded role",
+        payload={"evidence_ids": ["evidence-1"]},
+    )
+
+    assert parsed.stance == "neutral"
+    assert captured["model"] == "gemini-3.6-flash"
+    assert captured["system_instruction"] == "Bounded role"
+    assert captured["generation_config"] == {"thinking_level": "low"}
+    assert captured["store"] is False
+    assert captured["response_format"][0]["mime_type"] == "application/json"
+    assert captured["response_format"][0]["schema"] == AnalystReport.model_json_schema()
+
+
+def test_gemini_adapter_paces_consecutive_requests():
+    current = [0.0]
+    delays: list[float] = []
+
+    def sleep(delay: float) -> None:
+        delays.append(delay)
+        current[0] += delay
+
+    interaction = SimpleNamespace(
+        output_text=(
+            '{"stance":"neutral","confidence":"5",'
+            '"observations":["Không có lợi thế rõ ràng."],'
+            '"risks":[],"evidence_ids":["evidence-1"]}'
+        )
+    )
+    client = GeminiStructuredClient(
+        SimpleNamespace(interactions=SimpleNamespace(create=lambda **kwargs: interaction)),
+        min_interval_seconds=6,
+        clock=lambda: current[0],
+        sleep=sleep,
+    )
+    kwargs = {
+        "stage": "technical",
+        "model": "gemini-3.6-flash",
+        "thinking": "low",
+        "response_model": AnalystReport,
+        "system_prompt": "Bounded role",
+        "payload": {"evidence_ids": ["evidence-1"]},
+    }
+
+    client.generate(**kwargs)
+    client.generate(**kwargs)
+
+    assert delays == [6]
+
+
+def test_gemini_adapter_retries_rate_limit_after_provider_delay():
+    delays: list[float] = []
+    attempts = {"count": 0}
+
+    class RateLimitError(Exception):
+        status_code = 429
+
+    def create(**kwargs):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RateLimitError("Please retry in 2.5s")
+        return SimpleNamespace(
+            output_text=(
+                '{"stance":"neutral","confidence":"5",'
+                '"observations":["Không có lợi thế rõ ràng."],'
+                '"risks":[],"evidence_ids":["evidence-1"]}'
+            )
+        )
+
+    parsed = GeminiStructuredClient(
+        SimpleNamespace(interactions=SimpleNamespace(create=create)),
+        sleep=delays.append,
+    ).generate(
+        stage="technical",
+        model="gemini-3.6-flash",
+        thinking="low",
+        response_model=AnalystReport,
+        system_prompt="Bounded role",
+        payload={"evidence_ids": ["evidence-1"]},
+    )
+
+    assert parsed.stance == "neutral"
+    assert attempts["count"] == 2
+    assert delays == [3.5]
+
+
+def test_gemini_adapter_rejects_empty_or_invalid_output():
+    empty = GeminiStructuredClient(
+        SimpleNamespace(
+            interactions=SimpleNamespace(create=lambda **kwargs: SimpleNamespace(output_text=""))
+        )
+    )
+    invalid = GeminiStructuredClient(
+        SimpleNamespace(
+            interactions=SimpleNamespace(create=lambda **kwargs: SimpleNamespace(output_text="{}"))
+        )
+    )
+
+    for client in (empty, invalid):
+        with pytest.raises(StructuredOutputError):
+            client.generate(
+                stage="technical",
+                model="gemini-3.6-flash",
+                thinking="low",
+                response_model=AnalystReport,
+                system_prompt="Bounded role",
+                payload={"evidence_ids": ["evidence-1"]},
+            )
+
+
+def test_provider_failure_does_not_retry_or_switch_provider():
+    class FailingLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, **kwargs):
+            self.calls += 1
+            raise ProviderError("rate_limit")
+
+    llm = FailingLLM()
+
+    result = CryptoCommittee(llm, provider="gemini").run(valid_snapshot())
+
+    assert llm.calls == 1
+    assert result.decision.action == "NO_TRADE"
+    assert result.decision.reason == "provider:rate_limit"
+    assert result.calls[0].provider == "gemini"
+    assert result.calls[0].error_category == "rate_limit"
+
+
+def test_futures_setup_validation():
+    # Valid LONG setup
+    long_setup = FuturesSetupModel(
+        direction="LONG",
+        entry=Decimal("100"),
+        stop=Decimal("95"),
+        target=Decimal("110"),
+        risk_reward_ratio=Decimal("2.0"),
+        rationale="Hỗ trợ mạnh và cá mập tích lũy.",
+    )
+    assert long_setup.direction == "LONG"
+    assert long_setup.stop < long_setup.entry < long_setup.target
+
+    # Invalid LONG setup: stop >= entry
+    with pytest.raises(ValueError, match="LONG setup must satisfy stop < entry < target"):
+        FuturesSetupModel(
+            direction="LONG",
+            entry=Decimal("100"),
+            stop=Decimal("105"),
+            target=Decimal("110"),
+            risk_reward_ratio=Decimal("2.0"),
+            rationale="Invalid",
+        )
+
+    # Valid SHORT setup
+    short_setup = FuturesSetupModel(
+        direction="SHORT",
+        entry=Decimal("100"),
+        stop=Decimal("105"),
+        target=Decimal("90"),
+        risk_reward_ratio=Decimal("2.0"),
+        rationale="Kháng cự mạnh và funding quá nóng.",
+    )
+    assert short_setup.direction == "SHORT"
+    assert short_setup.target < short_setup.entry < short_setup.stop
+
+    # Invalid SHORT setup: stop <= entry
+    with pytest.raises(ValueError, match="SHORT setup must satisfy target < entry < stop"):
+        FuturesSetupModel(
+            direction="SHORT",
+            entry=Decimal("100"),
+            stop=Decimal("95"),
+            target=Decimal("90"),
+            risk_reward_ratio=Decimal("2.0"),
+            rationale="Invalid",
+        )
+
+
+def test_committee_returns_futures_bias_and_setups():
+    fake_llm = FakeLLM()
+    original_generate = fake_llm.generate
+
+    def manager_with_futures(**kwargs):
+        response = original_generate(**kwargs)
+        if kwargs["stage"] == "manager":
+            response["futures_bias"] = "BULLISH"
+            response["futures_setups"] = [
+                {
+                    "direction": "LONG",
+                    "entry": Decimal("100000"),
+                    "stop": Decimal("98000"),
+                    "target": Decimal("105000"),
+                    "risk_reward_ratio": Decimal("2.5"),
+                    "rationale": "Quét thanh lý Long xong bật tăng.",
+                },
+                {
+                    "direction": "SHORT",
+                    "entry": Decimal("105000"),
+                    "stop": Decimal("107000"),
+                    "target": Decimal("100000"),
+                    "risk_reward_ratio": Decimal("2.5"),
+                    "rationale": "Chạm kháng cự cứng trên khung Daily.",
+                },
+            ]
+        return response
+
+    fake_llm.generate = manager_with_futures
+    result = CryptoCommittee(fake_llm).run(valid_snapshot())
+
+    assert result.decision.futures_bias == "BULLISH"
+    assert len(result.decision.futures_setups) == 2
+    assert result.decision.futures_setups[0].direction == "LONG"
+    assert result.decision.futures_setups[0].entry == Decimal("100000")
+    assert result.decision.futures_setups[1].direction == "SHORT"
+    assert result.decision.futures_setups[1].stop == Decimal("107000")
+
+
+def test_committee_includes_prior_thesis_in_payload_and_records_continuity():
+    fake_llm = FakeLLM()
+    original_generate = fake_llm.generate
+
+    def manager_with_continuity(**kwargs):
+        response = original_generate(**kwargs)
+        if kwargs["stage"] == "manager":
+            response["thesis_continuity"] = "CONTINUED"
+        return response
+
+    fake_llm.generate = manager_with_continuity
+    snapshot = valid_snapshot()
+    prior_thesis = {
+        "run_id": "test-prior-run-123",
+        "cutoff": "2026-07-16T20:00:00+00:00",
+        "hours_ago": "4.2",
+        "action": "ACCUMULATE",
+        "conviction": "7.5",
+        "prior_price": "98000",
+        "current_price": "100000",
+        "price_change_pct": "2.04",
+        "bull_case": "Xu hướng tiếp diễn",
+        "bear_case": "Biến động",
+        "catalysts": ["Spot inflow"],
+        "invalidation": "Thủng 95000",
+        "entry": "98000",
+        "stop": "95000",
+        "target": "105000",
+    }
+
+    result = CryptoCommittee(fake_llm).run(snapshot, prior_thesis=prior_thesis)
+
+    assert result.decision.thesis_continuity == "CONTINUED"
+    assert result.decision.prior_run_id == "test-prior-run-123"
+
+    manager_call = next(req for req in fake_llm.requests if req["stage"] == "manager")
+    assert "prior_thesis" in manager_call["payload"]
+    assert manager_call["payload"]["prior_thesis"]["run_id"] == "test-prior-run-123"
+
+    bull_call = next(req for req in fake_llm.requests if req["stage"] == "bull_round_1")
+    assert "prior_thesis" in bull_call["payload"]
+    assert bull_call["payload"]["prior_thesis"]["action"] == "ACCUMULATE"

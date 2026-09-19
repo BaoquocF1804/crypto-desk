@@ -212,14 +212,18 @@ class Store:
             "report_dir": row["report_dir"],
         }
 
-    def latest_valid_run(self, symbol: str) -> dict[str, Any] | None:
-        rows = self.db.execute(
-            """
-            SELECT * FROM research_runs
-            WHERE symbol=? ORDER BY cutoff DESC LIMIT 100
-            """,
-            (symbol,),
-        ).fetchall()
+    def latest_valid_run(
+        self,
+        symbol: str,
+        before_cutoff: str | None = None,
+    ) -> dict[str, Any] | None:
+        query = "SELECT * FROM research_runs WHERE symbol=?"
+        params: list[Any] = [symbol]
+        if before_cutoff is not None:
+            query += " AND cutoff < ?"
+            params.append(before_cutoff)
+        query += " ORDER BY cutoff DESC LIMIT 100"
+        rows = self.db.execute(query, tuple(params)).fetchall()
         for row in rows:
             decision = json.loads(row["decision"])
             if decision.get("evidence_ids"):
@@ -231,6 +235,28 @@ class Store:
                     "report_dir": row["report_dir"],
                 }
         return None
+
+    def unreflected_runs(self, completed_before: str) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            """
+            SELECT r.* FROM research_runs AS r
+            LEFT JOIN reflections AS f ON f.run_id = r.id
+            WHERE f.run_id IS NULL AND r.cutoff <= ?
+            ORDER BY r.cutoff
+            LIMIT 100
+            """,
+            (completed_before,),
+        ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "symbol": row["symbol"],
+                "cutoff": row["cutoff"],
+                "decision": json.loads(row["decision"]),
+                "report_dir": row["report_dir"],
+            }
+            for row in rows
+        ]
 
     def save_ticket(self, ticket: TradeTicket) -> None:
         self.db.execute(

@@ -49,6 +49,11 @@ class EvidenceSnapshot:
     funding_rate: Decimal
     open_interest: Decimal
     news_count: int
+    long_short_ratio: Decimal | None = None
+    top_trader_ratio: Decimal | None = None
+    taker_buy_sell_ratio: Decimal | None = None
+    oi_change_1h_pct: Decimal | None = None
+    funding_rate_trend: str = "stable"
 
     @property
     def evidence_ids(self) -> tuple[str, ...]:
@@ -74,7 +79,8 @@ class PublicDataClient:
     ):
         self.news_feeds = news_feeds
         self.coingecko_key = coingecko_key or os.getenv("COINGECKO_DEMO_API_KEY")
-        self.client = client or httpx.Client(timeout=10, follow_redirects=True)
+        timeout = httpx.Timeout(30.0, connect=10.0, read=30.0)
+        self.client = client or httpx.Client(timeout=timeout, follow_redirects=True)
         self.now = now
         self._news_cache: tuple[datetime, Fetched] | None = None
 
@@ -85,19 +91,27 @@ class PublicDataClient:
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
     ) -> httpx.Response:
+        last_error: Exception | None = None
         for attempt in (0, 1):
             try:
                 response = self.client.get(url, params=params, headers=headers)
-            except httpx.TransportError:
+            except httpx.TransportError as exc:
+                last_error = exc
                 if attempt:
-                    raise
+                    raise EvidenceError(f"HTTP transport error fetching {url}: {exc}") from exc
                 time.sleep(0.5)
                 continue
-            if response.status_code >= 500 and not attempt:
-                time.sleep(0.5)
+            if (response.status_code == 429 or response.status_code >= 500) and not attempt:
+                retry_after = response.headers.get("Retry-After")
+                delay = min(float(retry_after), 60) if retry_after else 0.5
+                time.sleep(delay)
                 continue
             response.raise_for_status()
             return response
+        if last_error:
+            raise EvidenceError(
+                f"HTTP transport error fetching {url}: {last_error}"
+            ) from last_error
         raise EvidenceError(f"unreachable retry state for {url}")
 
     def _json(
@@ -109,8 +123,8 @@ class PublicDataClient:
         headers: dict[str, str] | None = None,
     ) -> tuple[str, Any, datetime]:
         url = f"{base}{path}"
-        fetched_at = _aware(self.now())
         response = self._get(url, params=params, headers=headers)
+        fetched_at = _aware(self.now())
         return str(response.url), response.json(), fetched_at
 
     def exchange_info(self, symbol: str) -> Fetched:
@@ -119,11 +133,24 @@ class PublicDataClient:
         )
         return Fetched("binance", source, fetched_at, fetched_at, payload)
 
-    def klines(self, symbol: str, interval: str, limit: int) -> Fetched:
+    def klines(
+        self,
+        symbol: str,
+        interval: str,
+        limit: int,
+        *,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+    ) -> Fetched:
+        params: dict[str, Any] = {"symbol": symbol, "interval": interval, "limit": limit}
+        if start_time is not None:
+            params["startTime"] = int(_aware(start_time).timestamp() * 1000)
+        if end_time is not None:
+            params["endTime"] = int(_aware(end_time).timestamp() * 1000)
         source, payload, fetched_at = self._json(
             SPOT_PUBLIC,
             "/api/v3/klines",
-            params={"symbol": symbol, "interval": interval, "limit": limit},
+            params=params,
         )
         if not payload:
             raise EvidenceError(f"No {interval} klines for {symbol}")
@@ -177,6 +204,49 @@ class PublicDataClient:
             payload,
         )
 
+    def funding_history(self, symbol: str, limit: int = 3) -> Fetched:
+        source, payload, fetched_at = self._json(
+            FUTURES_PUBLIC, "/fapi/v1/fundingRate", params={"symbol": symbol, "limit": limit}
+        )
+        as_of = _utc_from_ms(payload[-1]["fundingTime"]) if payload else fetched_at
+        return Fetched("binance-usdm", source, fetched_at, as_of, payload)
+
+    def open_interest_hist(self, symbol: str, period: str = "1h", limit: int = 3) -> Fetched:
+        source, payload, fetched_at = self._json(
+            FUTURES_PUBLIC,
+            "/futures/data/openInterestHist",
+            params={"symbol": symbol, "period": period, "limit": limit},
+        )
+        as_of = _utc_from_ms(payload[-1]["timestamp"]) if payload else fetched_at
+        return Fetched("binance-usdm", source, fetched_at, as_of, payload)
+
+    def global_long_short_ratio(self, symbol: str, period: str = "1h", limit: int = 1) -> Fetched:
+        source, payload, fetched_at = self._json(
+            FUTURES_PUBLIC,
+            "/futures/data/globalLongShortAccountRatio",
+            params={"symbol": symbol, "period": period, "limit": limit},
+        )
+        as_of = _utc_from_ms(payload[-1]["timestamp"]) if payload else fetched_at
+        return Fetched("binance-usdm", source, fetched_at, as_of, payload)
+
+    def top_long_short_ratio(self, symbol: str, period: str = "1h", limit: int = 1) -> Fetched:
+        source, payload, fetched_at = self._json(
+            FUTURES_PUBLIC,
+            "/futures/data/topLongShortPositionRatio",
+            params={"symbol": symbol, "period": period, "limit": limit},
+        )
+        as_of = _utc_from_ms(payload[-1]["timestamp"]) if payload else fetched_at
+        return Fetched("binance-usdm", source, fetched_at, as_of, payload)
+
+    def taker_long_short_ratio(self, symbol: str, period: str = "1h", limit: int = 1) -> Fetched:
+        source, payload, fetched_at = self._json(
+            FUTURES_PUBLIC,
+            "/futures/data/takerlongshortRatio",
+            params={"symbol": symbol, "period": period, "limit": limit},
+        )
+        as_of = _utc_from_ms(payload[-1]["timestamp"]) if payload else fetched_at
+        return Fetched("binance-usdm", source, fetched_at, as_of, payload)
+
     def coingecko(self, coin_id: str) -> Fetched:
         headers = {"x-cg-demo-api-key": self.coingecko_key} if self.coingecko_key else None
         source, payload, fetched_at = self._json(
@@ -199,7 +269,7 @@ class PublicDataClient:
             try:
                 response = self._get(url)
                 parsed = _parse_feed(response.text)
-            except (httpx.HTTPError, ET.ParseError, ValueError, TypeError):
+            except (httpx.HTTPError, ET.ParseError, ValueError, TypeError, EvidenceError):
                 continue
             sources.append(str(response.url))
             for item in parsed:
@@ -268,9 +338,19 @@ class EvidenceBuilder:
     def __init__(self, client: Any, coingecko_ids: dict[str, str]):
         self.client = client
         self.coingecko_ids = coingecko_ids
+        self._cache: dict[tuple[str, datetime, bool], EvidenceSnapshot] = {}
 
-    def build(self, symbol: str, cutoff: datetime) -> EvidenceSnapshot:
+    def build(
+        self,
+        symbol: str,
+        cutoff: datetime,
+        *,
+        live: bool = False,
+    ) -> EvidenceSnapshot:
         cutoff = _aware(cutoff)
+        cache_key = (symbol, cutoff, live)
+        if cache_key in self._cache:
+            return self._cache[cache_key]
         if symbol not in self.coingecko_ids:
             raise EvidenceError(f"Missing CoinGecko id for {symbol}")
 
@@ -307,8 +387,9 @@ class EvidenceBuilder:
             reference,
             news,
         )
+        future_cutoff = max(cutoff, *(item.fetched_at for item in fetched)) if live else cutoff
         for item in fetched:
-            if _aware(item.as_of) > cutoff:
+            if _aware(item.as_of) > future_cutoff:
                 raise EvidenceError(f"{item.provider} evidence is from the future")
 
         self._fresh(
@@ -367,21 +448,85 @@ class EvidenceBuilder:
         funding_rate = Decimal(str(funding.payload["lastFundingRate"]))
         open_interest_value = Decimal(str(open_interest.payload["openInterest"]))
         quote_volume = Decimal(str(ticker.payload["quoteVolume"]))
+        change_24h_pct = Decimal(str(ticker.payload["priceChangePercent"]))
 
         spot_payload = {
             "symbol": symbol,
             "mid": mid,
             "spread": spread,
             "quote_volume": quote_volume,
+            "change_24h_pct": change_24h_pct,
             "daily_closes": daily_closes,
             "four_hour_closes": four_hour_closes,
             "depth": depth.payload,
             "rules": asdict(rules),
         }
+        long_short_ratio: Decimal | None = None
+        top_trader_ratio: Decimal | None = None
+        taker_buy_sell_ratio: Decimal | None = None
+        oi_change_1h_pct: Decimal | None = None
+        funding_rate_trend: str = "stable"
+
+        try:
+            if hasattr(self.client, "funding_history"):
+                fh = self.client.funding_history(symbol, limit=3)
+                if fh and fh.payload and len(fh.payload) >= 2:
+                    rates = [Decimal(str(item["fundingRate"])) for item in fh.payload]
+                    if rates[-1] > rates[0] + Decimal("0.00005"):
+                        funding_rate_trend = "rising"
+                    elif rates[-1] < rates[0] - Decimal("0.00005"):
+                        funding_rate_trend = "falling"
+                    elif rates[-1] < 0:
+                        funding_rate_trend = "negative"
+                    else:
+                        funding_rate_trend = "stable"
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self.client, "open_interest_hist"):
+                oih = self.client.open_interest_hist(symbol, period="1h", limit=2)
+                if oih and oih.payload and len(oih.payload) >= 2:
+                    oi_prev = Decimal(str(oih.payload[0]["sumOpenInterest"]))
+                    oi_curr = Decimal(str(oih.payload[-1]["sumOpenInterest"]))
+                    if oi_prev > 0:
+                        oi_change_1h_pct = ((oi_curr - oi_prev) / oi_prev) * Decimal("100")
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self.client, "global_long_short_ratio"):
+                glsr = self.client.global_long_short_ratio(symbol, period="1h", limit=1)
+                if glsr and glsr.payload:
+                    long_short_ratio = Decimal(str(glsr.payload[-1]["longShortRatio"]))
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self.client, "top_long_short_ratio"):
+                tlsr = self.client.top_long_short_ratio(symbol, period="1h", limit=1)
+                if tlsr and tlsr.payload:
+                    top_trader_ratio = Decimal(str(tlsr.payload[-1]["longShortRatio"]))
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self.client, "taker_long_short_ratio"):
+                tklsr = self.client.taker_long_short_ratio(symbol, period="1h", limit=1)
+                if tklsr and tklsr.payload:
+                    taker_buy_sell_ratio = Decimal(str(tklsr.payload[-1]["buySellRatio"]))
+        except Exception:
+            pass
+
         derivatives_payload = {
             "symbol": symbol,
             "funding_rate": funding_rate,
             "open_interest": open_interest_value,
+            "funding_rate_trend": funding_rate_trend,
+            "oi_change_1h_pct": oi_change_1h_pct,
+            "long_short_ratio": long_short_ratio,
+            "top_trader_ratio": top_trader_ratio,
+            "taker_buy_sell_ratio": taker_buy_sell_ratio,
         }
         reference_payload = {
             "symbol": symbol,
@@ -397,7 +542,7 @@ class EvidenceBuilder:
             self._evidence("reference", reference, reference_payload),
             self._evidence("news", news, news_payload),
         )
-        return EvidenceSnapshot(
+        snapshot = EvidenceSnapshot(
             symbol=symbol,
             cutoff=iso(cutoff),
             rules=rules,
@@ -411,7 +556,32 @@ class EvidenceBuilder:
             funding_rate=funding_rate,
             open_interest=open_interest_value,
             news_count=len(recent_news),
+            long_short_ratio=long_short_ratio,
+            top_trader_ratio=top_trader_ratio,
+            taker_buy_sell_ratio=taker_buy_sell_ratio,
+            oi_change_1h_pct=oi_change_1h_pct,
+            funding_rate_trend=funding_rate_trend,
         )
+        self._cache[cache_key] = snapshot
+        return snapshot
+
+    def reflection_closes(
+        self,
+        symbol: str,
+        start: datetime,
+        periods: int = 20,
+    ) -> tuple[Decimal, ...]:
+        end = _aware(start) + timedelta(days=periods)
+        fetched = self.client.klines(
+            symbol,
+            "1d",
+            periods,
+            start_time=start,
+            end_time=end - timedelta(milliseconds=1),
+        )
+        if len(fetched.payload) != periods:
+            raise EvidenceError(f"Reflection for {symbol} needs {periods} completed daily candles")
+        return tuple(Decimal(str(row[4])) for row in fetched.payload)
 
     @staticmethod
     def _closed_klines(

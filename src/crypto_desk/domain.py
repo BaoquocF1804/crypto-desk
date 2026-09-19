@@ -110,6 +110,39 @@ class EvidenceItem:
 
 
 @dataclass(frozen=True, slots=True)
+class FuturesTradeSetup:
+    direction: Literal["LONG", "SHORT"]
+    entry: Decimal
+    stop: Decimal
+    target: Decimal
+    risk_reward_ratio: Decimal
+    rationale: str
+
+
+ThesisContinuity = Literal["NEW", "CONTINUED", "PIVOTED", "INVALIDATED"]
+
+
+@dataclass(frozen=True, slots=True)
+class PriorThesisContext:
+    run_id: str
+    cutoff: str
+    hours_ago: Decimal
+    action: Action
+    conviction: Decimal
+    prior_price: Decimal | None
+    current_price: Decimal
+    price_change_pct: Decimal | None
+    bull_case: str
+    bear_case: str
+    catalysts: tuple[str, ...]
+    invalidation: str
+    entry: Decimal | None
+    stop: Decimal | None
+    target: Decimal | None
+    futures_bias: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ResearchDecision:
     symbol: str
     action: Action
@@ -123,6 +156,10 @@ class ResearchDecision:
     target: Decimal | None
     evidence_ids: tuple[str, ...]
     reason: str
+    futures_bias: Literal["BULLISH", "BEARISH", "NEUTRAL"] | None = None
+    futures_setups: tuple[FuturesTradeSetup, ...] = ()
+    thesis_continuity: ThesisContinuity = "NEW"
+    prior_run_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

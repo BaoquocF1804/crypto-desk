@@ -14,16 +14,24 @@ from typing import Annotated, Any, Literal
 import httpx
 import typer
 from dotenv import load_dotenv
+from google import genai
 from openai import OpenAI
 from pydantic import BaseModel
 
 from .broker import BinanceSpotBroker
-from .committee import CryptoCommittee, OpenAIStructuredClient
+from .committee import (
+    CryptoCommittee,
+    GeminiStructuredClient,
+    OpenAIStructuredClient,
+    ProviderError,
+    StructuredClient,
+)
 from .config import MAINNET_GRADUATION_CHAINS, Settings, load_settings
 from .dashboard import (
     DashboardPublishError,
     SITES_BYPASS_TOKEN_ENV,
     build_dashboard_snapshot,
+    is_loopback_url,
     publish_dashboard_if_configured,
     publish_dashboard_from_env,
 )
@@ -298,13 +306,11 @@ def runner(ctx: typer.Context) -> None:
     bypass_token = os.getenv(SITES_BYPASS_TOKEN_ENV)
     missing = [
         name
-        for name, value in (
-            (COMMAND_API_URL_ENV, base_url),
-            (RUNNER_TOKEN_ENV, runner_token),
-            (SITES_BYPASS_TOKEN_ENV, bypass_token),
-        )
+        for name, value in ((COMMAND_API_URL_ENV, base_url), (RUNNER_TOKEN_ENV, runner_token))
         if not value
     ]
+    if base_url and not is_loopback_url(base_url) and not bypass_token:
+        missing.append(SITES_BYPASS_TOKEN_ENV)
     if missing:
         _fail(f"Thiếu biến môi trường bắt buộc: {', '.join(missing)}")
 
@@ -312,7 +318,7 @@ def runner(ctx: typer.Context) -> None:
         settings,
         base_url=base_url,
         runner_token=runner_token,
-        sites_bypass_token=bypass_token,
+        sites_bypass_token=bypass_token or "",
         enabled=os.getenv(RUNNER_ENABLED_ENV, "1") == "1",
         log=lambda message: typer.echo(message, err=True),
     )
@@ -347,6 +353,7 @@ def doctor_report(
     for package in (
         "crypto-desk",
         "binance-sdk-spot",
+        "google-genai",
         "openai",
         "httpx",
         "pydantic",
@@ -360,7 +367,24 @@ def doctor_report(
         "packages": packages,
         "openai": {
             "key_present": bool(os.getenv("OPENAI_API_KEY")),
+            "active": settings.models.provider == "openai",
             "online_smoke_requested": online,
+        },
+        "gemini": {
+            "key_present": bool(
+                os.getenv("GEMINI_API_KEY")
+                or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+                or os.getenv("GOOGLE_CLOUD_PROJECT")
+            ),
+            "active": settings.models.provider in {"gemini", "vertexai"},
+            "online_smoke_requested": online,
+        },
+        "llm": {
+            "provider": settings.models.provider,
+            "quick_model": settings.models.quick,
+            "deep_model": settings.models.deep,
+            "quick_thinking": settings.models.quick_thinking,
+            "deep_thinking": settings.models.deep_thinking,
         },
         "binance": {
             "environment": environment,
@@ -452,32 +476,21 @@ def _online_doctor(settings: Settings) -> dict[str, Any]:
                 )
         results["rss"] = rss_results
 
-    if os.getenv("OPENAI_API_KEY"):
-        try:
-            response = OpenAI().responses.parse(
-                model=settings.models.quick,
-                input=[
-                    {
-                        "role": "system",
-                        "content": "Return ok=true.",
-                    },
-                    {"role": "user", "content": "Health check."},
-                ],
-                text_format=_DoctorSmoke,
-            )
-            results["openai_structured_output"] = {
-                "ok": bool(response.output_parsed and response.output_parsed.ok)
-            }
-        except Exception as exc:
-            results["openai_structured_output"] = {
-                "ok": False,
-                "error": type(exc).__name__,
-            }
-    else:
-        results["openai_structured_output"] = {
-            "ok": False,
-            "error": "missing_key",
-        }
+    provider_result = f"{settings.models.provider}_structured_output"
+    try:
+        response = _structured_client(settings).generate(
+            stage="doctor",
+            model=settings.models.quick,
+            thinking=settings.models.quick_thinking,
+            response_model=_DoctorSmoke,
+            system_prompt="Return JSON with ok=true.",
+            payload={"check": "health"},
+        )
+        results[provider_result] = {"ok": bool(response.ok)}
+    except ProviderError as exc:
+        results[provider_result] = {"ok": False, "error": exc.category}
+    except Exception as exc:
+        results[provider_result] = {"ok": False, "error": type(exc).__name__}
     return results
 
 
@@ -497,9 +510,12 @@ def _service(
     selected_committee = None
     if committee:
         selected_committee = CryptoCommittee(
-            OpenAIStructuredClient(OpenAI()),
+            _structured_client(settings),
+            provider=settings.models.provider,
             quick_model=settings.models.quick,
             deep_model=settings.models.deep,
+            quick_thinking=settings.models.quick_thinking,
+            deep_thinking=settings.models.deep_thinking,
             debate_rounds=settings.models.debate_rounds,
         )
     selected_execution = None
@@ -518,6 +534,50 @@ def _service(
         committee=selected_committee,
         execution=selected_execution,
     )
+
+
+def _structured_client(settings: Settings) -> StructuredClient:
+    if settings.models.provider in {"gemini", "vertexai"}:
+        credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        project = os.getenv("GOOGLE_CLOUD_PROJECT")
+        location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+        if credentials_path or project or settings.models.provider == "vertexai":
+            if credentials_path and not os.path.isabs(credentials_path):
+                resolved = Path(credentials_path).resolve()
+                if resolved.exists():
+                    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(resolved)
+            kwargs: dict[str, Any] = {"vertexai": True}
+            if project:
+                kwargs["project"] = project
+            if location:
+                kwargs["location"] = location
+            return GeminiStructuredClient(
+                genai.Client(**kwargs),
+                min_interval_seconds=float(os.getenv("GEMINI_MIN_REQUEST_INTERVAL_SECONDS", "6")),
+            )
+
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise ProviderError("missing_key")
+        api_version = (
+            "v1beta"
+            if any(
+                model.endswith("-preview")
+                for model in (settings.models.quick, settings.models.deep)
+            )
+            else "v1"
+        )
+        return GeminiStructuredClient(
+            genai.Client(
+                api_key=api_key,
+                http_options={"api_version": api_version},
+            ),
+            min_interval_seconds=float(os.getenv("GEMINI_MIN_REQUEST_INTERVAL_SECONDS", "6")),
+        )
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ProviderError("missing_key")
+    return OpenAIStructuredClient(OpenAI(api_key=api_key))
 
 
 def _execution_service(settings: Settings) -> ExecutionService:
@@ -564,10 +624,15 @@ def _emit(ctx: typer.Context, payload: Any) -> None:
         )
         return
     if isinstance(payload, AnalysisRun):
-        typer.echo(
-            f"# {payload.decision.symbol}: {payload.decision.action}\n\n"
-            f"Báo cáo: {payload.report_dir}"
-        )
+        msg = f"# {payload.decision.symbol}: {payload.decision.action}\n"
+        if payload.decision.futures_bias:
+            msg += f"- Futures Bias: {payload.decision.futures_bias}\n"
+        if payload.decision.futures_setups:
+            msg += "- Futures Setups (Non-executing):\n"
+            for setup in payload.decision.futures_setups:
+                msg += f"  • [{setup.direction}] Entry: {setup.entry} | SL: {setup.stop} | TP: {setup.target} (R:R {setup.risk_reward_ratio})\n"
+        msg += f"\nBáo cáo: {payload.report_dir}"
+        typer.echo(msg)
     else:
         typer.echo(
             json.dumps(
