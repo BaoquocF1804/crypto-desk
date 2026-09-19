@@ -16,6 +16,7 @@ from .domain import (
     PortfolioSnapshot,
     ResearchDecision,
     format_pct,
+    is_decided,
     iso,
     to_jsonable,
     utcnow,
@@ -346,6 +347,11 @@ class CryptoDeskService:
         completed_before = iso(self._aware(cutoff) - timedelta(days=REFLECTION_HORIZON_DAYS))
         saved: list[str] = []
         for run in self.store.unreflected_runs(completed_before, tuple(self.settings.symbols)):
+            # Lớp chặn evidence_ids không đủ: committee._no_trade truyền
+            # evidence_ids của snapshot nên một lần rate limit vẫn lọt qua và
+            # được chấm điểm như một quyết định.
+            if not is_decided(run["decision"]):
+                continue
             if not run["decision"].get("evidence_ids"):
                 continue
             try:
@@ -875,6 +881,7 @@ class CryptoDeskService:
             reason=reason,
             thesis_continuity="NEW",
             prior_run_id=prior_run_id,
+            decided=False,
         )
 
 

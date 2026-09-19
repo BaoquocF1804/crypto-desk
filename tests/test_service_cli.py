@@ -1606,3 +1606,85 @@ def test_doctor_omits_project_and_location_when_backend_is_not_vertex(tmp_path: 
     assert report["llm"]["backend"] == "gemini_api"
     assert "project" not in report["llm"]
     assert "location" not in report["llm"]
+
+
+def test_is_decided_reads_the_flag_when_present():
+    from crypto_desk.domain import is_decided
+
+    assert is_decided({"decided": True, "reason": "bất kỳ"}) is True
+    assert is_decided({"decided": False, "reason": "Quyết định của hội đồng."}) is False
+
+
+def test_is_decided_falls_back_to_reason_for_legacy_rows():
+    from crypto_desk.domain import is_decided
+
+    assert is_decided({"reason": "Quyết định của hội đồng."}) is True
+    assert is_decided({"reason": "committee decision"}) is True
+    assert is_decided({"reason": "provider:rate_limit"}) is False
+    assert is_decided({"reason": "provider:model_unavailable"}) is False
+    assert is_decided({"reason": "evidence snapshot is stale or incomplete"}) is False
+    assert is_decided({}) is False
+
+
+def test_committee_no_trade_is_not_a_decision():
+    from crypto_desk.committee import CryptoCommittee
+    from crypto_desk.domain import is_decided, to_jsonable
+
+    decision = CryptoCommittee._no_trade(make_snapshot("BTCUSDT"), "provider:rate_limit")
+
+    assert decision.decided is False
+    assert is_decided(to_jsonable(decision)) is False
+
+
+def test_service_no_trade_is_not_a_decision():
+    from crypto_desk.domain import is_decided, to_jsonable
+    from crypto_desk.service import CryptoDeskService
+
+    decision = CryptoDeskService._no_trade("BTCUSDT", "evidence_provider:ReadTimeout")
+
+    assert decision.decided is False
+    assert is_decided(to_jsonable(decision)) is False
+
+
+def test_refresh_reflections_skips_runs_the_committee_never_decided(tmp_path: Path):
+    """Lỗi tầng committee mang evidence_ids không rỗng nên lớp chặn cũ không bắt được."""
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    report_dir = tmp_path / "failed-run"
+    report_dir.mkdir()
+    (report_dir / "evidence.json").write_text(json.dumps({"binance_mid": "100"}), encoding="utf-8")
+    failed = ResearchDecision(
+        symbol="BTCUSDT",
+        action="NO_TRADE",
+        conviction=Decimal("0"),
+        bull_case="Bull",
+        bear_case="Bear",
+        catalysts=(),
+        invalidation="Invalidation",
+        entry=None,
+        stop=None,
+        target=None,
+        evidence_ids=("evidence-1",),
+        reason="provider:rate_limit",
+        decided=False,
+    )
+    store.save_run(
+        "failed-run",
+        (NOW - timedelta(days=21)).isoformat(),
+        failed,
+        report_dir,
+    )
+
+    class _Builder:
+        def reflection_closes(self, symbol, start, periods=20):
+            return tuple(Decimal("100") for _ in range(20))
+
+    service = CryptoDeskService(settings, store, evidence_builder=_Builder())
+    try:
+        saved = service.refresh_reflections(NOW)
+        rows = store.list_reflections()
+    finally:
+        store.close()
+
+    assert saved == []
+    assert rows == []

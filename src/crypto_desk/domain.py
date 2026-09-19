@@ -42,6 +42,24 @@ def format_pct(value: Any) -> str:
     return f"{Decimal(str(value)) * 100:+.2f}%"
 
 
+# Lý do của một quyết định thật, đủ cả hai bản: chuỗi tiếng Anh cũ và bản tiếng
+# Việt hiện hành. Dùng để suy ra ``decided`` cho hàng ghi trước khi có cờ đó.
+DECIDED_REASONS = frozenset({"committee decision", "Quyết định của hội đồng."})
+
+
+def is_decided(decision: dict[str, Any]) -> bool:
+    """Hội đồng có thật sự ra quyết định này không, hay đây là một lần chạy hỏng.
+
+    ``_no_trade`` sinh ra một ``ResearchDecision`` trông y hệt quyết định thật,
+    nên nếu không phân biệt được hai thứ thì bảng chấm điểm sẽ đo giá đi đâu sau
+    một lần rate limit và gọi đó là kết quả của một quyết định.
+    """
+    flag = decision.get("decided")
+    if flag is not None:
+        return bool(flag)
+    return str(decision.get("reason", "")) in DECIDED_REASONS
+
+
 @dataclass(frozen=True, slots=True)
 class SymbolRules:
     symbol: str
@@ -165,6 +183,7 @@ class ResearchDecision:
     futures_setups: tuple[FuturesTradeSetup, ...] = ()
     thesis_continuity: ThesisContinuity = "NEW"
     prior_run_id: str | None = None
+    decided: bool = True
 
 
 @dataclass(frozen=True, slots=True)

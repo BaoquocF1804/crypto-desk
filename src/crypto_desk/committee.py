@@ -767,4 +767,5 @@ class CryptoCommittee:
             target=None,
             evidence_ids=snapshot.evidence_ids,
             reason=reason,
+            decided=False,
         )
