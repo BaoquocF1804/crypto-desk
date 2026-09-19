@@ -26,7 +26,7 @@ Ba module mới cho đường VN; một chỗ chạm nhỏ, có kiểm soát, v�
 
 ## Nguồn dữ liệu: SSI iboard
 
-Đã thăm dò trực tiếp ngày 2026-09-19, không cần API key, không bị Cloudflare chặn. TCBS bị Cloudflare, CafeF trả rỗng, VCI sai path — SSI là lựa chọn duy nhất chạy được mà không thêm dependency.
+Đã thăm dò trực tiếp ngày 2026-09-19, không cần API key, không bị Cloudflare chặn. TCBS bị Cloudflare, CafeF trả rỗng, VCI sai path — SSI là lựa chọn duy nhất chạy được mà không thêm dependency. Câu này chỉ đúng cho **dữ liệu thị trường**; báo cáo tài chính là chuyện khác và buộc phải thêm dependency, xem mục vnstock bên dưới.
 
 | Endpoint | Cho gì |
 |---|---|
@@ -47,7 +47,7 @@ foreignCurrentRoom
 netBuySellVol, netBuySellVal
 ```
 
-## Bốn chuyên gia, ánh xạ sang thị trường VN
+## Năm chuyên gia, ánh xạ sang thị trường VN
 
 | Vai crypto | Vai VN | Evidence kind | Dữ liệu |
 |---|---|---|---|
@@ -55,12 +55,36 @@ netBuySellVol, netBuySellVal
 | liquidity | liquidity | `spot` | `totalMatchVol/Val`, `avgPrice`, số lệnh mua/bán, khoảng cách tới trần/sàn |
 | news | news | `news` | RSS CafeF + Vietstock |
 | derivatives | **dòng tiền** | `flow` | khối ngoại mua/bán ròng, `foreignCurrentRoom`, `netBuySellVol`, mất cân đối lệnh mua/bán |
+| *(không có)* | **cơ bản** | `fundamentals` | báo cáo kết quả kinh doanh, cân đối kế toán, chỉ tiêu tài chính — **tùy chọn**, xem bất biến 9 |
 
 Vai "derivatives" ở crypto đọc vị thế của một nhóm tham gia khác thông qua thị trường phái sinh. VN không có phái sinh cho từng mã, nhưng có khối ngoại và room ngoại — cùng chức năng, khác dữ liệu. Đây là ánh xạ theo vai trò, không phải cố nhét dữ liệu vào chỗ trống.
+
+Chuyên gia **cơ bản** không có đối ứng bên crypto, vì crypto không có báo cáo tài chính. Với cổ phiếu thì ngược lại: phân tích mà không đọc báo cáo tài chính là bỏ qua phần cốt lõi. Đây là chuyên gia duy nhất mà đường VN có thêm so với crypto, và là chuyên gia duy nhất có evidence **tùy chọn**.
 
 Ngoài bốn chuyên gia, snapshot VN còn mang một evidence item kind `reference`: giá `matchedPrice` lấy từ `iboard-query`, đúng vai CoinGecko ở đường crypto. Không chuyên gia nào đọc riêng nó; nó tồn tại để kiểm chéo (bất biến 2) và để `required_kinds` đủ bộ.
 
 Debate bull/bear và manager giữ nguyên như crypto. Manager VN không sinh `futures_setups` — không có thị trường phái sinh cho từng mã để lập kịch bản. Không cần đổi schema: `ManagerDecision.futures_bias` đã mặc định `"NEUTRAL"` và `futures_setups` mặc định rỗng, nên manager VN chỉ cần không nhắc tới chúng trong prompt.
+
+## Nguồn thứ hai: vnstock, cho báo cáo tài chính
+
+SSI iboard **không** có báo cáo tài chính — chỉ `company-profile` (vốn điều lệ, số cổ phiếu, free float, ngành). Đã khảo sát ngày 2026-09-20: TCBS bị Cloudflare chặn kể cả với header trình duyệt đầy đủ, CafeF trả 301 không có JSON API dùng được, Vietstock render bằng JS phải scrape. `vnstock` là lựa chọn duy nhất chạy được.
+
+Dùng `vnstock.api.financial.Finance(symbol, source="VCI")`, **không** dùng lớp `Vnstock()` cũ — nó đã in cảnh báo ngừng hỗ trợ.
+
+| Phương thức | Cho gì |
+|---|---|
+| `income_statement(period, lang="vi")` | báo cáo kết quả kinh doanh theo năm/quý |
+| `balance_sheet(period, lang="vi")` | cân đối kế toán |
+| `ratio(period, lang="vi")` | 54 chỉ tiêu: P/E, P/B, ROE, ROA, biên lợi nhuận, đòn bẩy, và bộ chỉ tiêu ngân hàng |
+
+Cái giá phải trả, ghi ra để không ai bất ngờ:
+
+- **Phá tính chất "không thêm dependency"** mà phần SSI ở trên đạt được.
+- **Phụ thuộc vào bên thứ ba duy trì workaround Cloudflare.** TCBS chặn chúng ta trực tiếp; vnstock qua được vì họ bảo trì. Ngày họ ngừng, tầng cơ bản chết.
+- Có "Insiders Program", hàm ý free tier bị giới hạn rate.
+- In banner quảng cáo — đã kiểm: ra **stderr**, stdout sạch, nên `desk --json` không bị hỏng JSON.
+
+Vì ba điểm đầu, evidence `fundamentals` là **tùy chọn** (bất biến 10). Một thư viện bên thứ ba không được phép làm chết cả desk.
 
 ## Bất biến bắt buộc
 
@@ -132,6 +156,28 @@ Bắt buộc: **prompt manager VN chỉ đưa ra ba lựa chọn — ACCUMULATE,
 
 Đây là giới hạn của V1, không phải thiết kế cuối. Gỡ nó cần một nguồn vị thế cho VN (người dùng tự khai danh mục), nằm ngoài phạm vi V1.
 
+### 9. Không đưa chỉ tiêu tài chính không áp dụng cho loại hình doanh nghiệp
+
+Bảng `ratio()` của vnstock là **hợp phẳng** của chỉ tiêu ngân hàng và phi ngân hàng: cả FPT lẫn MBB đều trả về đúng 54 chỉ tiêu như nhau. Ô không áp dụng **không phải null, mà bằng 0.0**.
+
+Đã kiểm ngày 2026-09-20: FPT — một công ty công nghệ không cho vay — có `Nợ xấu (%) = 0.0`. Đưa nguyên bảng cho model thì nó sẽ kết luận "FPT nợ xấu 0%, chất lượng tín dụng xuất sắc" và dựng luận điểm trên đó. Chiều ngược lại, MBB có `Số ngày tồn kho = 0` cho một ngân hàng không có hàng tồn kho.
+
+Cùng loại bẫy với bất biến 1: con số đúng về kỹ thuật, vô nghĩa về ý nghĩa, và model sẽ tin nó.
+
+Bắt buộc: phân loại doanh nghiệp bằng `industryName` từ `company-profile` của SSI (đã có sẵn, miễn phí — FPT trả `"Công nghệ Thông tin"`, MBB trả `"Ngân hàng"`), rồi **loại bỏ hẳn** chỉ tiêu không áp dụng khỏi payload thay vì để số 0 đi qua. Không dùng `bankNumberOfBranch`: nó bằng 0 cho cả hai, vô dụng làm bộ phân loại.
+
+Phạm vi của bất biến này **chỉ là `ratio()`**. `income_statement` và `balance_sheet` đã đúng theo loại hình sẵn: FPT trả 25 chỉ tiêu (`Doanh thu thuần`, `Giá vốn hàng bán`, `Lợi nhuận gộp`), MBB trả 26 (`Thu nhập lãi và các khoản thu nhập tương tự`, `Lãi/(lỗ) thuần từ mua bán chứng khoán kinh doanh`), chỉ 7 chỉ tiêu chung. Hai bản báo cáo khác nhau thật sự, không cần lọc.
+
+### 10. `fundamentals` là evidence tùy chọn, không được làm chết run
+
+`required_kinds` hiện tại chặn cả run khi thiếu bất kỳ kind nào. `fundamentals` **không** nằm trong tập đó.
+
+Khi vnstock hỏng, rate limit, hay đổi API: chuyên gia cơ bản bị bỏ qua, run vẫn chạy với bốn chuyên gia còn lại, và **báo cáo ghi rõ ở đầu rằng phân tích này không đọc được báo cáo tài chính**. Không im lặng bỏ qua — người đọc phải biết mình đang cầm một phân tích thiếu phần cơ bản.
+
+Cần một thay đổi nhỏ trong `committee.run()`: `_specialist_payload` hiện làm `next(item for item in snapshot.items if item.kind == kind)`, ném `StopIteration` khi thiếu. Phải bỏ qua chuyên gia có evidence vắng mặt thay vì vỡ, và ghi tên chuyên gia bị bỏ vào `CommitteeResult` để service dựng dòng cảnh báo.
+
+Đây là lý do đã chọn ở mục vnstock: một thư viện bên thứ ba không được phép quyết định desk có chạy hay không.
+
 ## Interface
 
 ### Snapshot
@@ -171,6 +217,8 @@ Trong `run()`:
 
 `MAX_ENTRY_DEVIATION` giữ nguyên 2% cho cả hai đường — với cổ phiếu biên độ ±7% thì 2% quanh giá khớp gần nhất vẫn là ràng buộc hợp lý cho một mức entry. Chỉ thông báo lỗi phải sửa: nó đang ghi cứng `"entry price deviates more than 2% from Binance mid"`, sai chữ khi chạy trên HOSE. Dùng `self.mid_label` để dựng thông báo; VN truyền `"giá khớp SSI"`.
 
+Thêm một thay đổi nữa cho bất biến 10: `_specialist_payload` đang làm `next(item for item in snapshot.items if item.kind == kind)` và ném `StopIteration` khi evidence vắng mặt. Đổi thành trả `None`, `run()` bỏ qua chuyên gia đó, và `CommitteeResult` mang thêm `skipped_specialists: tuple[str, ...]` để service dựng dòng cảnh báo trong báo cáo. Với crypto tập này luôn rỗng vì `required_kinds` đã chặn trước, nên hành vi không đổi.
+
 `OUTPUT_CONTRACT` dùng chung, không đổi.
 
 ### Module mới
@@ -178,7 +226,8 @@ Trong `run()`:
 | File | Nội dung |
 |---|---|
 | `src/crypto_desk/vn_data.py` | `SSIClient` (3 endpoint, có timeout và retry như `PublicDataClient`), `VNEvidenceBuilder.build(symbol, cutoff)`, `reflection_closes(symbol, start)`, `VNEvidenceSnapshot` |
-| `src/crypto_desk/vn_prompts.py` | `VN_SPECIALISTS`, `VN_ROLE_PROMPTS` (4 chuyên gia + bull/bear/manager bản VN), `VN_SPECIALIST_EVIDENCE` |
+| `src/crypto_desk/vn_fundamentals.py` | `VNFundamentals.fetch(symbol, industry) -> EvidenceItem \| None` — gọi vnstock, lọc `ratio()` theo ngành (bất biến 9), trả `None` thay vì ném khi vnstock hỏng (bất biến 10) |
+| `src/crypto_desk/vn_prompts.py` | `VN_SPECIALISTS` (5 chuyên gia), `VN_ROLE_PROMPTS` (5 chuyên gia + bull/bear/manager bản VN), `VN_SPECIALIST_EVIDENCE`, `RATIO_WHITELIST` theo ngành |
 | `src/crypto_desk/vn_service.py` | `VNDeskService.analyze(symbol, cutoff)` — dựng evidence, gọi committee, ghi `research_runs` + artifacts, `refresh_reflections` với benchmark VN30 |
 
 ### Store — cần một bộ lọc, không dùng lại nguyên vẹn
@@ -214,6 +263,12 @@ vn_news_feeds:
   - https://vietstock.vn/144/chung-khoan/co-phieu.rss
 ```
 
+Dependency mới trong `pyproject.toml`, ghim phiên bản chính xác như mọi dependency khác của repo:
+
+```
+"vnstock==<phiên bản đang cài lúc thực thi>",
+```
+
 Hằng số: `VN_BENCHMARK_SYMBOL = "VN30"`, `VN_V1_SYMBOLS = frozenset({"FPT","MBB"})`.
 
 `vn_symbols` **không** đi qua `endswith("USDT")` hay `V1_SYMBOLS`; validate riêng theo `VN_V1_SYMBOLS`.
@@ -229,9 +284,13 @@ desk vn-analyze FPT
       │                                  ├→ lệch >0,5% → EvidenceError → NO_TRADE
       │                   closeRaw      ─┘
       ├ RSS CafeF/Vietstock → news items
+      ├ company-profile → industryName (phân loại ngành cho bất biến 9)
+      ├ vnstock → income_statement + balance_sheet + ratio(đã lọc theo ngành)
+      │            hỏng → bỏ qua, KHÔNG ném (bất biến 10)
       └ kiểm phiên gần nhất đã đóng → không thì EvidenceError
   └ CryptoCommittee.run(snapshot, specialists=VN_SPECIALISTS, ...)
-      technical / liquidity / news / flow → bull ⇄ bear ×2 → manager
+      technical / liquidity / news / flow / cơ bản → bull ⇄ bear ×2 → manager
+      chuyên gia thiếu evidence bị bỏ qua, tên vào skipped_specialists
   └ Store.save_run + artifacts (report.md, evidence.json, decision.json)
 
 desk vn-daily
@@ -257,6 +316,8 @@ Theo đúng nguyên tắc sẵn có của desk: **thà không ra gì còn hơn r
 | SSI lỗi mạng / 5xx | retry rồi `EvidenceError` → `NO_TRADE` |
 | Tất cả RSS feed hỏng | `EvidenceError` — cùng cách desk crypto xử `news_feeds` rỗng |
 | Chuỗi giá < số phiên cần | `EvidenceError`, không suy đoán bù |
+| **vnstock lỗi / rate limit / đổi API** | **bỏ qua chuyên gia cơ bản, run vẫn chạy**, báo cáo ghi rõ ở đầu là thiếu phần cơ bản |
+| `industryName` không đọc được | bỏ qua chuyên gia cơ bản — không đoán ngành để lọc chỉ tiêu |
 
 Mọi dòng trên đều kết thúc bằng `NO_TRADE` được ghi vào `research_runs` — nhưng **không dòng nào trong số đó được sinh reflection** (bất biến 7). Chỉ run mang `decided: true` mới vào bảng chấm điểm. Đọc bảng này mà quên điều đó là tái tạo đúng lỗi đang có trong dữ liệu hôm nay.
 
@@ -274,6 +335,9 @@ Bắt buộc, ngoài test đơn vị thông thường:
 8. **Hàng reflection cũ không có `decided`** — suy ra từ `reason` đúng theo cả hai định dạng: `"committee decision"` (bản tiếng Anh cũ) và `"Quyết định của hội đồng."`.
 9. **`unreflected_runs` lọc theo symbol** — trộn run `BTCUSDT` và `FPT` trong cùng bảng, khẳng định truy vấn với `settings.symbols` không trả về `FPT` và ngược lại. Bảo vệ khỏi lỗi nuốt im lặng.
 10. **Prompt manager VN không mời REDUCE/EXIT** — khẳng định chuỗi prompt chỉ liệt kê ACCUMULATE, HOLD, NO_TRADE. Bảo vệ bất biến 8.
+11. **Chỉ tiêu ngân hàng bị loại khỏi payload của FPT** — fixture `ratio()` có `Nợ xấu (%) = 0.0` cho FPT, khẳng định khoá đó **không tồn tại** trong payload gửi model, chứ không phải bằng 0. Chiều ngược lại: `Số ngày tồn kho` bị loại khỏi payload của MBB. Bảo vệ bất biến 9 — đây là test quan trọng nhất của phần cơ bản.
+12. **vnstock hỏng không làm chết run** — cho `VNFundamentals.fetch` ném, khẳng định `build()` vẫn trả snapshot, `fundamentals` không có trong `items`, và committee vẫn chạy với bốn chuyên gia còn lại.
+13. **Báo cáo nói rõ khi thiếu phần cơ bản** — khẳng định `report.md` chứa dòng cảnh báo khi `skipped_specialists` không rỗng. Thiếu im lặng là thứ bất biến 10 cấm.
 
 ## Không làm ở V1
 
