@@ -313,6 +313,7 @@ class CryptoDeskService:
         closes: tuple[Decimal, ...],
         benchmark_closes: tuple[Decimal, ...],
         decision_action: str | None = None,
+        decision_cutoff: str | None = None,
     ) -> dict[str, Any]:
         if len(closes) < REFLECTION_HORIZON_DAYS:
             raise ValueError(
@@ -323,8 +324,15 @@ class CryptoDeskService:
             closes=closes,
             benchmark_closes=benchmark_closes,
         )
+        # ``created_at`` của hàng reflection là lúc job chấm điểm chạy, muộn hơn
+        # ngày quyết định đúng một horizon. Ghi cutoff và horizon thật vào payload
+        # để prompt không gán nhầm ngày, và để đổi hằng số horizon về sau không
+        # dán nhãn lại các hàng đã đo bằng cửa sổ cũ.
+        payload["horizon_days"] = REFLECTION_HORIZON_DAYS
         if decision_action is not None:
             payload["decision_action"] = decision_action
+        if decision_cutoff is not None:
+            payload["decision_cutoff"] = decision_cutoff
         if not self.store.save_reflection(
             run_id,
             symbol,
@@ -365,6 +373,7 @@ class CryptoDeskService:
                     closes=closes,
                     benchmark_closes=benchmark,
                     decision_action=str(run["decision"]["action"]),
+                    decision_cutoff=str(run["cutoff"]),
                 )
             except (EvidenceError, OSError, ValueError, KeyError, TypeError):
                 continue
@@ -880,20 +889,38 @@ def render_reflection(item: dict[str, Any]) -> str:
     Dòng alpha bị bỏ khi symbol chính là benchmark: alpha của nó luôn bằng 0
     theo cấu tạo, in ra sẽ đọc như "không tạo được lợi thế" thay vì "không áp
     dụng".
+
+    Ngày và horizon lấy từ payload, không lấy từ hằng số hay ``created_at``:
+    ``created_at`` là lúc chấm điểm (muộn hơn quyết định đúng một horizon) nên
+    in ra sẽ nói dối model về ngày ra quyết định. Hàng cũ thiếu key thì nói rõ
+    đó là ngày ghi nhận.
+
+    Mọi mệnh đề đọc payload bằng ``.get`` và tự bỏ đi khi thiếu: hàm này chạy
+    trên đường ``analyze`` ngoài khối ``try``, một hàng payload hỏng mà ném
+    ``KeyError`` sẽ giết cả lần chạy thay vì rụng một dòng reflection.
     """
     payload = item["payload"]
     symbol = item["symbol"]
     action = payload.get("decision_action") or "KHÔNG RÕ"
-    parts = [
-        f"{item['created_at'][:10]}",
-        symbol,
-        f"quyết định {action}",
-        f"sau {REFLECTION_HORIZON_DAYS} ngày: lợi nhuận "
-        f"{format_pct(payload['realized_return'])}",
-    ]
-    if symbol != BENCHMARK_SYMBOL:
-        parts.append(f"alpha so với {BENCHMARK_SYMBOL} {format_pct(payload['alpha'])}")
-    parts.append(f"sụt sâu nhất {format_pct(payload['maximum_adverse_excursion'])}")
+    cutoff = payload.get("decision_cutoff")
+    horizon = payload.get("horizon_days") or REFLECTION_HORIZON_DAYS
+    when = (
+        str(cutoff)[:10]
+        if cutoff
+        else f"ghi nhận {item['created_at'][:10]} (chưa rõ ngày quyết định)"
+    )
+    parts = [when, symbol, f"quyết định {action}"]
+    realized = payload.get("realized_return")
+    if realized is None:
+        parts.append(f"cửa sổ {horizon} ngày")
+    else:
+        parts.append(f"sau {horizon} ngày: lợi nhuận {format_pct(realized)}")
+    alpha = payload.get("alpha")
+    if symbol != BENCHMARK_SYMBOL and alpha is not None:
+        parts.append(f"alpha so với {BENCHMARK_SYMBOL} {format_pct(alpha)}")
+    worst = payload.get("maximum_adverse_excursion")
+    if worst is not None:
+        parts.append(f"điểm tệ nhất trong cửa sổ {format_pct(worst)}")
     return " | ".join(parts)
 
 

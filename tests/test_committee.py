@@ -676,3 +676,15 @@ def test_committee_includes_prior_thesis_in_payload_and_records_continuity():
     bull_call = next(req for req in fake_llm.requests if req["stage"] == "bull_round_1")
     assert "prior_thesis" in bull_call["payload"]
     assert bull_call["payload"]["prior_thesis"]["action"] == "ACCUMULATE"
+
+
+def test_output_contract_states_the_reflection_window_cuts_both_ways():
+    """Cửa sổ ngắn không chứng minh được sai — và cũng không chứng minh được đúng."""
+    from crypto_desk.committee import _system_prompt
+
+    prompt = _system_prompt("manager")
+
+    assert "20 ngày" in prompt
+    assert "không đủ để kết luận luận điểm sai" in prompt
+    assert "không đủ để kết luận luận điểm đúng" in prompt
+    assert "cả hai chiều" in prompt

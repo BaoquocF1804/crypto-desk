@@ -737,6 +737,10 @@ def test_daily_schedules_due_reflections_once(tmp_path: Path):
     assert reflection["run_id"] == "old-run"
     assert reflection["payload"]["decision_action"] == "HOLD"
     assert reflection["payload"]["alpha"] == "0"
+    # Ngày quyết định là cutoff của run, không phải created_at của lần chấm điểm.
+    assert reflection["payload"]["decision_cutoff"] == (NOW - timedelta(days=21)).isoformat()
+    assert reflection["payload"]["horizon_days"] == 20
+    assert reflection["created_at"][:10] != reflection["payload"]["decision_cutoff"][:10]
 
 
 def test_json_doctor_reports_secret_presence_without_values(
@@ -1387,30 +1391,100 @@ def test_scorecard_command_renders_table(tmp_path: Path):
     assert "+4.00%" in result.stdout
 
 
-def test_render_reflection_states_horizon_action_and_alpha():
+def test_render_reflection_states_decision_date_horizon_action_and_alpha():
     from crypto_desk.service import render_reflection
 
     line = render_reflection(
         {
             "run_id": "run-1",
             "symbol": "ETHUSDT",
-            "created_at": "2026-09-01T00:00:00+00:00",
+            "created_at": "2026-09-21T00:00:00+00:00",
             "payload": {
                 "realized_return": "0.05",
                 "maximum_adverse_excursion": "-0.02",
                 "alpha": "0.04",
                 "decision_action": "ACCUMULATE",
+                "decision_cutoff": "2026-09-01T00:00:00+00:00",
+                "horizon_days": 20,
             },
         }
     )
 
-    assert "2026-09-01" in line
+    # Ngày in ra phải là ngày quyết định, không phải ngày job chấm điểm chạy.
+    assert line.startswith("2026-09-01")
+    assert "2026-09-21" not in line
     assert "ETHUSDT" in line
     assert "ACCUMULATE" in line
     assert "20 ngày" in line
     assert "+5.00%" in line
     assert "alpha so với BTCUSDT +4.00%" in line
-    assert "-2.00%" in line
+    assert "điểm tệ nhất trong cửa sổ -2.00%" in line
+
+
+def test_render_reflection_uses_the_rows_own_horizon_not_the_current_constant():
+    from crypto_desk.service import render_reflection
+
+    line = render_reflection(
+        {
+            "run_id": "run-old",
+            "symbol": "ETHUSDT",
+            "created_at": "2026-09-21T00:00:00+00:00",
+            "payload": {
+                "realized_return": "0.05",
+                "maximum_adverse_excursion": "-0.02",
+                "alpha": "0.04",
+                "decision_action": "HOLD",
+                "decision_cutoff": "2026-09-01T00:00:00+00:00",
+                "horizon_days": 7,
+            },
+        }
+    )
+
+    assert "sau 7 ngày" in line
+    assert "20 ngày" not in line
+
+
+def test_render_reflection_marks_a_legacy_row_date_as_the_recording_date():
+    from crypto_desk.service import render_reflection
+
+    line = render_reflection(
+        {
+            "run_id": "run-legacy",
+            "symbol": "ETHUSDT",
+            "created_at": "2026-08-07T00:00:00+00:00",
+            "payload": {
+                "realized_return": "0.05",
+                "maximum_adverse_excursion": "-0.02",
+                "alpha": "0.04",
+                "decision_action": "HOLD",
+            },
+        }
+    )
+
+    assert "ghi nhận 2026-08-07" in line
+    assert "chưa rõ ngày quyết định" in line
+    # Thiếu horizon_days thì lùi về hằng số hiện hành.
+    assert "sau 20 ngày" in line
+
+
+def test_render_reflection_omits_clauses_whose_payload_keys_are_missing():
+    from crypto_desk.service import render_reflection
+
+    line = render_reflection(
+        {
+            "run_id": "run-broken",
+            "symbol": "ETHUSDT",
+            "created_at": "2026-08-07T00:00:00+00:00",
+            "payload": {"decision_action": "HOLD", "alpha": None},
+        }
+    )
+
+    assert "ETHUSDT" in line
+    assert "HOLD" in line
+    assert "cửa sổ 20 ngày" in line
+    assert "lợi nhuận" not in line
+    assert "alpha" not in line
+    assert "tệ nhất" not in line
 
 
 def test_render_reflection_omits_alpha_for_the_benchmark_itself():
