@@ -484,17 +484,24 @@ def _build_committee_evaluation(
                 if isinstance(rep, dict):
                     st = str(rep.get("stance", "neutral")).lower()
                     cf = Decimal(str(rep.get("confidence", "5")))
-                    obs = rep.get("observations", [])
-                    lead_obs = (
-                        obs[0] if obs else (rep.get("risks", [""])[0] if rep.get("risks") else "")
-                    )
+                    obs_items = [str(o).strip() for o in rep.get("observations", []) if str(o).strip()]
+                    risk_items = [str(r).strip() for r in rep.get("risks", []) if str(r).strip()]
+                    parts: list[str] = []
+                    if obs_items:
+                        parts.extend([f"• {o}" for o in obs_items[:2]])
+                    if risk_items:
+                        parts.append(f"Rủi ro: {risk_items[0]}")
+                    vote_summary = "\n".join(parts) if parts else str(rep.get("summary", "")).strip()
+                    if len(vote_summary) > 450:
+                        vote_summary = vote_summary[:440] + "..."
+
                     votes.append(
                         DashboardMemberVote(
                             role=rk,
                             label=rlabel,
                             stance=st,
                             confidence=cf,
-                            summary=str(lead_obs)[:220],
+                            summary=vote_summary,
                         )
                     )
                     if st == "bullish":
