@@ -41,7 +41,7 @@ def test_groups_by_action_and_computes_mean_median_and_correct_direction_rate():
             _reflection("BNBUSDT", "HOLD", "0.01"),
         ]
     )
-    scores = {score.action: score for score in card.scores}
+    scores = {score.action: score for score in card.groups[0].scores}
     assert scores["ACCUMULATE"].samples == 3
     assert scores["ACCUMULATE"].mean_alpha == Decimal("0.01")
     assert scores["ACCUMULATE"].median_alpha == Decimal("0.02")
@@ -58,7 +58,7 @@ def test_median_of_even_sample_averages_the_middle_pair():
             _reflection("SOLUSDT", "HOLD", "0.03"),
         ]
     )
-    assert card.scores[0].median_alpha == Decimal("0.02")
+    assert card.groups[0].scores[0].median_alpha == Decimal("0.02")
 
 
 def test_benchmark_symbol_is_excluded_because_its_alpha_is_zero_by_construction():
@@ -70,7 +70,7 @@ def test_benchmark_symbol_is_excluded_because_its_alpha_is_zero_by_construction(
     )
     assert card.skipped_benchmark == 1
     assert card.scored == 1
-    assert card.scores[0].mean_alpha == Decimal("0.04")
+    assert card.groups[0].scores[0].mean_alpha == Decimal("0.04")
 
 
 def test_legacy_rows_without_decision_action_are_skipped_and_counted():
@@ -109,7 +109,7 @@ def test_step_away_actions_score_negative_alpha_as_the_correct_call():
             _reflection("BNBUSDT", "REDUCE", "0.01", cutoff="2026-07-04T00:00:00+00:00"),
         ]
     )
-    scores = {score.action: score for score in card.scores}
+    scores = {score.action: score for score in card.groups[0].scores}
     assert scores["NO_TRADE"].correct_direction_rate == Decimal("0.5")
     assert scores["EXIT"].correct_direction_rate == Decimal(1)
     assert scores["REDUCE"].correct_direction_rate == Decimal(0)
@@ -124,7 +124,7 @@ def test_holding_actions_still_score_positive_alpha_as_correct():
             _reflection("SOLUSDT", "HOLD", "-0.04"),
         ]
     )
-    scores = {score.action: score for score in card.scores}
+    scores = {score.action: score for score in card.groups[0].scores}
     assert scores["ACCUMULATE"].correct_direction_rate == Decimal(1)
     assert scores["HOLD"].correct_direction_rate == Decimal(0)
 
@@ -137,8 +137,8 @@ def test_distinct_days_collapse_same_symbol_same_decision_day_runs():
             _reflection("SOLUSDT", "NO_TRADE", "0.06", cutoff="2026-07-17T09:00:00+00:00"),
         ]
     )
-    assert card.scores[0].samples == 3
-    assert card.scores[0].distinct_days == 2
+    assert card.groups[0].scores[0].samples == 3
+    assert card.groups[0].scores[0].distinct_days == 2
 
 
 def test_distinct_days_fall_back_to_created_at_for_legacy_rows():
@@ -148,7 +148,7 @@ def test_distinct_days_fall_back_to_created_at_for_legacy_rows():
             _reflection("ETHUSDT", "HOLD", "0.05", created_at="2026-08-07T11:00:00+00:00"),
         ]
     )
-    assert card.scores[0].distinct_days == 1
+    assert card.groups[0].scores[0].distinct_days == 1
 
 
 def test_unknown_action_is_counted_so_the_header_arithmetic_closes():
@@ -190,6 +190,61 @@ def test_statistics_are_quantized_for_json_consumers():
             _reflection("SUIUSDT", "HOLD", "-0.01"),
         ]
     )
-    score = card.scores[0]
+    score = card.groups[0].scores[0]
     assert str(score.correct_direction_rate) == "0.6667"
     assert str(score.mean_alpha) == "0.0033"
+
+
+def _row(symbol: str, action: str, alpha: str, benchmark: str | None = None) -> dict:
+    payload = {
+        "realized_return": "0.05",
+        "maximum_adverse_excursion": "-0.02",
+        "maximum_favorable_excursion": "0.08",
+        "benchmark_return": "0.01",
+        "alpha": alpha,
+        "decision_action": action,
+    }
+    if benchmark is not None:
+        payload["benchmark_symbol"] = benchmark
+    return {
+        "run_id": f"{symbol}-{action}-{alpha}",
+        "symbol": symbol,
+        "created_at": "2026-09-01T00:00:00+00:00",
+        "payload": payload,
+    }
+
+
+def test_alpha_against_different_benchmarks_never_shares_a_mean():
+    card = build_scorecard(
+        [
+            _row("ETHUSDT", "ACCUMULATE", "0.04", "BTCUSDT"),
+            _row("FPT", "ACCUMULATE", "-0.10", "VN30"),
+        ]
+    )
+    by = {g.benchmark: g for g in card.groups}
+
+    assert set(by) == {"BTCUSDT", "VN30"}
+    assert by["BTCUSDT"].scores[0].mean_alpha == Decimal("0.04")
+    assert by["VN30"].scores[0].mean_alpha == Decimal("-0.10")
+
+
+def test_legacy_row_without_benchmark_is_inferred_from_the_symbol_and_marked():
+    card = build_scorecard([_row("ETHUSDT", "HOLD", "0.01")])
+    group = card.groups[0]
+
+    assert group.benchmark == "BTCUSDT"
+    assert group.inferred is True
+    assert "suy ra" in card.render()
+
+
+def test_render_shows_one_table_per_benchmark():
+    rendered = build_scorecard(
+        [
+            _row("ETHUSDT", "ACCUMULATE", "0.04", "BTCUSDT"),
+            _row("FPT", "ACCUMULATE", "-0.10", "VN30"),
+        ]
+    ).render()
+
+    assert "BTCUSDT" in rendered
+    assert "VN30" in rendered
+    assert rendered.count("Action") == 2

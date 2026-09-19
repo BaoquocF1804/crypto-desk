@@ -315,6 +315,7 @@ class CryptoDeskService:
         benchmark_closes: tuple[Decimal, ...],
         decision_action: str | None = None,
         decision_cutoff: str | None = None,
+        benchmark_symbol: str | None = None,
     ) -> dict[str, Any]:
         if len(closes) < REFLECTION_HORIZON_DAYS:
             raise ValueError(
@@ -334,6 +335,8 @@ class CryptoDeskService:
             payload["decision_action"] = decision_action
         if decision_cutoff is not None:
             payload["decision_cutoff"] = decision_cutoff
+        if benchmark_symbol is not None:
+            payload["benchmark_symbol"] = benchmark_symbol
         if not self.store.save_reflection(
             run_id,
             symbol,
@@ -380,6 +383,7 @@ class CryptoDeskService:
                     benchmark_closes=benchmark,
                     decision_action=str(run["decision"]["action"]),
                     decision_cutoff=str(run["cutoff"]),
+                    benchmark_symbol=BENCHMARK_SYMBOL,
                 )
             except (EvidenceError, OSError, ValueError, KeyError, TypeError):
                 continue

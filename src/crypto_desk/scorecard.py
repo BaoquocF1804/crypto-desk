@@ -43,6 +43,13 @@ class ActionScore:
 
 
 @dataclass(frozen=True, slots=True)
+class BenchmarkGroup:
+    benchmark: str
+    inferred: bool
+    scores: tuple[ActionScore, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class Scorecard:
     horizon_days: int
     benchmark: str
@@ -50,7 +57,7 @@ class Scorecard:
     skipped_no_action: int
     skipped_unknown_action: int
     skipped_benchmark: int
-    scores: tuple[ActionScore, ...]
+    groups: tuple[BenchmarkGroup, ...]
 
     def render(self) -> str:
         lines = [
@@ -61,22 +68,28 @@ class Scorecard:
             f"{self.skipped_unknown_action} action lạ, "
             f"{self.skipped_benchmark} thuộc chính benchmark).",
         ]
-        if not self.scores:
+        if not self.groups:
             lines.append("Chưa đủ dữ liệu để chấm.")
             return "\n".join(lines)
-        lines.append("")
-        lines.append(
-            f"{'Action':<12}{'N':>4}{'Ngày':>6}{'Alpha TB':>11}{'Alpha TV':>11}"
-            f"{'Đúng hướng':>12}{'Tệ nhất':>11}"
-        )
-        for score in self.scores:
+        for group in self.groups:
+            lines.append("")
+            lines.append(f"Benchmark: {group.benchmark}")
+            if group.inferred:
+                lines.append(
+                    "  Benchmark của nhóm này được suy ra từ symbol, không đọc từ dữ liệu."
+                )
             lines.append(
-                f"{score.action:<12}{score.samples:>4}{score.distinct_days:>6}"
-                f"{format_pct(score.mean_alpha):>11}"
-                f"{format_pct(score.median_alpha):>11}"
-                f"{score.correct_direction_rate * 100:>11.0f}%"
-                f"{format_pct(score.mean_worst_excursion):>11}"
+                f"{'Action':<12}{'N':>4}{'Ngày':>6}{'Alpha TB':>11}{'Alpha TV':>11}"
+                f"{'Đúng hướng':>12}{'Tệ nhất':>11}"
             )
+            for score in group.scores:
+                lines.append(
+                    f"{score.action:<12}{score.samples:>4}{score.distinct_days:>6}"
+                    f"{format_pct(score.mean_alpha):>11}"
+                    f"{format_pct(score.median_alpha):>11}"
+                    f"{score.correct_direction_rate * 100:>11.0f}%"
+                    f"{format_pct(score.mean_worst_excursion):>11}"
+                )
         lines.append("")
         lines.append(
             "Alpha đo theo chiều long và không đảo dấu theo action: "
@@ -94,13 +107,28 @@ class Scorecard:
         return "\n".join(lines)
 
 
+def _benchmark_of(item: dict[str, Any]) -> tuple[str, bool]:
+    """Benchmark của hàng, và có phải suy ra hay không.
+
+    Hàng ghi trước khi ``benchmark_symbol`` tồn tại chỉ có thể suy ra từ symbol.
+    Gộp alpha đo với hai benchmark khác nhau vào một trung bình là vô nghĩa, nên
+    khi không chắc thì phải nói ra chứ không đoán thầm.
+    """
+    stored = item["payload"].get("benchmark_symbol")
+    if stored:
+        return str(stored), False
+    return (BENCHMARK_SYMBOL, True) if item["symbol"].endswith("USDT") else ("?", True)
+
+
 def build_scorecard(reflections: list[dict[str, Any]]) -> Scorecard:
-    buckets: dict[str, list[tuple[Decimal, Decimal, tuple[str, str]]]] = {}
+    buckets: dict[tuple[str, str], list[tuple[Decimal, Decimal, tuple[str, str]]]] = {}
+    inferred_flags: dict[str, bool] = {}
     skipped_no_action = 0
     skipped_unknown_action = 0
     skipped_benchmark = 0
     for item in reflections:
-        if item["symbol"] == BENCHMARK_SYMBOL:
+        bench, inferred = _benchmark_of(item)
+        if item["symbol"] == bench:
             skipped_benchmark += 1
             continue
         payload = item["payload"]
@@ -115,22 +143,34 @@ def build_scorecard(reflections: list[dict[str, Any]]) -> Scorecard:
         # Hàng cũ không có decision_cutoff: lùi về created_at, thô hơn nhưng vẫn
         # gộp được các lần chạy cùng ngày của cùng symbol.
         day = str(payload.get("decision_cutoff") or item["created_at"])[:10]
-        buckets.setdefault(action, []).append(
+        inferred_flags[bench] = inferred_flags.get(bench, False) or inferred
+        buckets.setdefault((bench, action), []).append(
             (
                 Decimal(str(payload["alpha"])),
                 Decimal(str(payload["maximum_adverse_excursion"])),
                 (item["symbol"], day),
             )
         )
-    scores = tuple(_score(action, buckets[action]) for action in ACTIONS if action in buckets)
+    groups = tuple(
+        BenchmarkGroup(
+            benchmark=bench,
+            inferred=inferred_flags[bench],
+            scores=tuple(
+                _score(action, buckets[(bench, action)])
+                for action in ACTIONS
+                if (bench, action) in buckets
+            ),
+        )
+        for bench in sorted(inferred_flags)
+    )
     return Scorecard(
         horizon_days=REFLECTION_HORIZON_DAYS,
         benchmark=BENCHMARK_SYMBOL,
-        scored=sum(score.samples for score in scores),
+        scored=sum(s.samples for g in groups for s in g.scores),
         skipped_no_action=skipped_no_action,
         skipped_unknown_action=skipped_unknown_action,
         skipped_benchmark=skipped_benchmark,
-        scores=scores,
+        groups=groups,
     )
 
 
