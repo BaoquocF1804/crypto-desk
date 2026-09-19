@@ -49,6 +49,14 @@ from .runner import (
 from .scorecard import Scorecard, build_scorecard
 from .service import AnalysisRun, CryptoDeskService
 from .store import Store
+from .vn_data import SSIClient, VNEvidenceBuilder
+from .vn_prompts import (
+    VN_OPTIONAL_KINDS,
+    VN_ROLE_PROMPTS,
+    VN_SPECIALIST_EVIDENCE,
+    VN_SPECIALISTS,
+)
+from .vn_service import VNDeskService
 
 
 app = typer.Typer(
@@ -128,6 +136,25 @@ def daily(
     if result.get("status") == "COMPLETED":
         _publish_dashboard_if_configured(settings)
     _emit(ctx, result)
+
+
+@app.command("vn-analyze")
+def vn_analyze(ctx: typer.Context, symbol: str) -> None:
+    settings = _load(ctx)
+    normalized = symbol.upper()
+    if normalized not in settings.vn_symbols:
+        _fail("Symbol is outside the configured VN allowlist")
+    _emit(ctx, _vn_service(settings).analyze(normalized))
+
+
+@app.command("vn-daily")
+def vn_daily(
+    ctx: typer.Context,
+    due: Annotated[bool, typer.Option("--due")] = False,
+    catch_up: Annotated[bool, typer.Option("--catch-up")] = False,
+) -> None:
+    settings = _load(ctx)
+    _emit(ctx, _vn_service(settings).daily(due=due, catch_up=catch_up))
 
 
 @app.command()
@@ -555,6 +582,37 @@ def _service(
         evidence_builder=evidence_builder,
         committee=selected_committee,
         execution=selected_execution,
+    )
+
+
+def _vn_service(
+    settings: Settings,
+    *,
+    committee: bool = True,
+) -> VNDeskService:
+    store = Store(settings.database)
+    evidence_builder = VNEvidenceBuilder(SSIClient(settings.vn_news_feeds))
+    selected_committee = None
+    if committee:
+        selected_committee = CryptoCommittee(
+            _structured_client(settings),
+            provider=settings.models.provider,
+            quick_model=settings.models.quick,
+            deep_model=settings.models.deep,
+            quick_thinking=settings.models.quick_thinking,
+            deep_thinking=settings.models.deep_thinking,
+            debate_rounds=settings.models.debate_rounds,
+            specialists=VN_SPECIALISTS,
+            role_prompts=VN_ROLE_PROMPTS,
+            specialist_evidence=VN_SPECIALIST_EVIDENCE,
+            optional_kinds=VN_OPTIONAL_KINDS,
+            mid_label="giá khớp SSI",
+        )
+    return VNDeskService(
+        settings,
+        store,
+        evidence_builder=evidence_builder,
+        committee=selected_committee,
     )
 
 

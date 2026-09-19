@@ -648,9 +648,12 @@ class CryptoCommittee:
                     system_prompt=system_prompt,
                     payload=payload,
                 )
-                parsed = (
-                    raw if isinstance(raw, response_model) else response_model.model_validate(raw)
-                )
+                if isinstance(raw, str):
+                    parsed = response_model.model_validate_json(raw)
+                elif isinstance(raw, response_model):
+                    parsed = raw
+                else:
+                    parsed = response_model.model_validate(raw)
                 self._validate_evidence_ids(
                     parsed.evidence_ids,
                     valid_evidence_ids,

@@ -212,6 +212,8 @@ def test_public_commands_exist():
         "reflections",
         "publish-dashboard",
         "runner",
+        "vn-analyze",
+        "vn-daily",
     ):
         assert command in result.stdout
 
@@ -323,6 +325,19 @@ def test_analyze_rejects_symbol_outside_allowlist(tmp_path: Path):
     result = CliRunner().invoke(
         app,
         ["--config", str(config), "analyze", "DOGEUSDT"],
+    )
+
+    assert result.exit_code != 0
+    assert "allowlist" in result.output
+
+
+def test_vn_analyze_rejects_symbol_outside_allowlist(tmp_path: Path):
+    config = tmp_path / "config.yaml"
+    config.write_text("symbols: [BTCUSDT]\nvn_symbols: [FPT]\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        app,
+        ["--config", str(config), "vn-analyze", "VIC"],
     )
 
     assert result.exit_code != 0
