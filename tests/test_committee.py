@@ -688,3 +688,63 @@ def test_output_contract_states_the_reflection_window_cuts_both_ways():
     assert "không đủ để kết luận luận điểm sai" in prompt
     assert "không đủ để kết luận luận điểm đúng" in prompt
     assert "cả hai chiều" in prompt
+
+
+def test_crypto_behaviour_is_unchanged_when_no_new_arguments_are_passed():
+    from crypto_desk.committee import (
+        ROLE_PROMPTS,
+        SPECIALISTS,
+        SPECIALIST_EVIDENCE,
+        CryptoCommittee,
+    )
+
+    committee = CryptoCommittee(object())
+
+    assert committee.specialists == SPECIALISTS
+    assert committee.role_prompts == ROLE_PROMPTS
+    assert committee.specialist_evidence == SPECIALIST_EVIDENCE
+    assert committee.optional_kinds == frozenset()
+    assert committee.mid_label == "Binance mid"
+
+
+def test_required_kinds_are_derived_from_the_evidence_map_excluding_optional():
+    from crypto_desk.committee import SPECIALIST_EVIDENCE, CryptoCommittee
+
+    committee = CryptoCommittee(object())
+
+    assert committee.required_kinds == {
+        kind for kind, _ in SPECIALIST_EVIDENCE.values()
+    } | {"reference"}
+    assert committee.required_kinds == {"spot", "news", "derivatives", "reference"}
+
+    vn_committee = CryptoCommittee(
+        object(),
+        specialists=("technical", "cơ bản"),
+        specialist_evidence={
+            "technical": ("spot", ("symbol", "mid")),
+            "cơ bản": ("fundamentals", ("symbol",)),
+        },
+        optional_kinds=frozenset({"fundamentals"}),
+    )
+    assert vn_committee.required_kinds == {"spot", "reference"}
+    assert vn_committee.optional_kinds == frozenset({"fundamentals"})
+
+
+def test_a_specialist_whose_evidence_is_absent_is_skipped_not_fatal():
+    from crypto_desk.committee import CryptoCommittee
+
+    committee = CryptoCommittee(
+        object(),
+        specialists=("technical", "cơ bản"),
+        specialist_evidence={
+            "technical": ("spot", ("symbol", "mid")),
+            "cơ bản": ("fundamentals", ("symbol",)),
+        },
+        optional_kinds=frozenset({"fundamentals"}),
+    )
+    snapshot = valid_snapshot()  # chỉ có spot/news/derivatives/reference
+
+    payload = committee._specialist_payload(snapshot, "cơ bản")
+
+    assert payload is None
+

@@ -438,6 +438,7 @@ class CommitteeResult:
     decision: ResearchDecision
     reports: dict[str, AnalystReport]
     calls: tuple[ModelCall, ...] = ()
+    skipped_specialists: tuple[str, ...] = ()
 
 
 class CommitteeOutputError(ValueError):
@@ -455,6 +456,11 @@ class CryptoCommittee:
         quick_thinking: str = "low",
         deep_thinking: str = "high",
         debate_rounds: int = 2,
+        specialists: tuple[str, ...] = SPECIALISTS,
+        role_prompts: dict[str, str] | None = None,
+        specialist_evidence: dict[str, tuple[str, tuple[str, ...]]] | None = None,
+        optional_kinds: frozenset[str] = frozenset(),
+        mid_label: str = "Binance mid",
     ):
         if debate_rounds != 2:
             raise ValueError("Crypto Desk V1 requires exactly two debate rounds")
@@ -465,6 +471,20 @@ class CryptoCommittee:
         self.quick_thinking = quick_thinking
         self.deep_thinking = deep_thinking
         self.debate_rounds = debate_rounds
+        self.specialists = specialists
+        self.role_prompts = role_prompts or ROLE_PROMPTS
+        self.specialist_evidence = specialist_evidence or SPECIALIST_EVIDENCE
+        self.optional_kinds = optional_kinds
+        self.mid_label = mid_label
+        # Suy ra thay vì ghi cứng: một bộ chuyên gia khác kéo theo một tập kind
+        # khác, loại trừ các kind tùy chọn (optional_kinds) như fundamentals của VN.
+        self.required_kinds = {
+            kind for kind, _ in self.specialist_evidence.values()
+            if kind not in self.optional_kinds
+        } | {"reference"}
+
+    def _role_system_prompt(self, role: str) -> str:
+        return f"{OUTPUT_CONTRACT}\n\n{self.role_prompts[role]}"
 
     def run(
         self,
@@ -476,8 +496,9 @@ class CryptoCommittee:
     ) -> CommitteeResult:
         reports: dict[str, AnalystReport] = {}
         calls: list[ModelCall] = []
-        required_kinds = {"spot", "news", "derivatives", "reference"}
-        if {item.kind for item in snapshot.items} != required_kinds or any(
+        present_kinds = {item.kind for item in snapshot.items}
+        allowed_kinds = self.required_kinds | self.optional_kinds
+        if not self.required_kinds.issubset(present_kinds) or not present_kinds.issubset(allowed_kinds) or any(
             item.stale for item in snapshot.items
         ):
             return CommitteeResult(
@@ -487,6 +508,7 @@ class CryptoCommittee:
                 ),
                 reports=reports,
                 calls=tuple(calls),
+                skipped_specialists=(),
             )
         payload = self._base_payload(
             snapshot,
@@ -494,18 +516,23 @@ class CryptoCommittee:
             position_quantity,
             prior_thesis=prior_thesis,
         )
+        skipped: list[str] = []
         try:
-            for role in SPECIALISTS:
-                role_payload, role_evidence_ids = self._specialist_payload(snapshot, role)
+            for role in self.specialists:
+                specialist = self._specialist_payload(snapshot, role)
+                if specialist is None:
+                    skipped.append(role)
+                    continue
+                role_payload, role_evidence_ids = specialist
                 reports[role] = self._call(
                     stage=role,
                     model=self.quick_model,
                     thinking=self.quick_thinking,
                     response_model=AnalystReport,
-                    system_prompt=_system_prompt(role),
+                    system_prompt=self._role_system_prompt(role),
                     payload=role_payload,
                     valid_evidence_ids=role_evidence_ids,
-                    snapshot_mid=snapshot.binance_mid,
+                    snapshot_mid=snapshot.mid,
                     calls=calls,
                 )
 
@@ -517,7 +544,7 @@ class CryptoCommittee:
                         model=self.deep_model,
                         thinking=self.deep_thinking,
                         response_model=AnalystReport,
-                        system_prompt=_system_prompt(side),
+                        system_prompt=self._role_system_prompt(side),
                         payload={
                             **payload,
                             "stage": stage,
@@ -525,7 +552,7 @@ class CryptoCommittee:
                             "reports": self._reports_payload(reports),
                         },
                         valid_evidence_ids=snapshot.evidence_ids,
-                        snapshot_mid=snapshot.binance_mid,
+                        snapshot_mid=snapshot.mid,
                         calls=calls,
                     )
 
@@ -534,14 +561,14 @@ class CryptoCommittee:
                 model=self.deep_model,
                 thinking=self.deep_thinking,
                 response_model=ManagerDecision,
-                system_prompt=_system_prompt("manager"),
+                system_prompt=self._role_system_prompt("manager"),
                 payload={
                     **payload,
                     "stage": "manager",
                     "reports": self._reports_payload(reports),
                 },
                 valid_evidence_ids=snapshot.evidence_ids,
-                snapshot_mid=snapshot.binance_mid,
+                snapshot_mid=snapshot.mid,
                 position_quantity=position_quantity,
                 calls=calls,
             )
@@ -550,6 +577,7 @@ class CryptoCommittee:
                 decision=self._no_trade(snapshot, str(exc)),
                 reports=reports,
                 calls=tuple(calls),
+                skipped_specialists=tuple(skipped),
             )
 
         futures_setups = tuple(
@@ -590,7 +618,9 @@ class CryptoCommittee:
             ),
             reports=reports,
             calls=tuple(calls),
+            skipped_specialists=tuple(skipped),
         )
+
 
     def _call(
         self,
@@ -681,8 +711,8 @@ class CryptoCommittee:
         if unknown:
             raise ValueError("unknown evidence IDs")
 
-    @staticmethod
     def _validate_manager(
+        self,
         decision: ManagerDecision,
         position_quantity: Decimal,
         snapshot_mid: Decimal,
@@ -699,7 +729,7 @@ class CryptoCommittee:
         if not decision.stop < decision.entry < decision.target:
             raise ValueError(f"{decision.action} requires stop < entry < target")
         if abs(decision.entry - snapshot_mid) / snapshot_mid > MAX_ENTRY_DEVIATION:
-            raise ValueError("entry price deviates more than 2% from Binance mid")
+            raise ValueError(f"entry price deviates more than 2% from {self.mid_label}")
 
     @staticmethod
     def _base_payload(
@@ -719,13 +749,15 @@ class CryptoCommittee:
             payload["prior_thesis"] = to_jsonable(prior_thesis)
         return payload
 
-    @staticmethod
     def _specialist_payload(
+        self,
         snapshot: EvidenceSnapshot,
         role: str,
-    ) -> tuple[dict[str, Any], tuple[str, ...]]:
-        kind, fields = SPECIALIST_EVIDENCE[role]
-        evidence = next(item for item in snapshot.items if item.kind == kind)
+    ) -> tuple[dict[str, Any], tuple[str, ...]] | None:
+        kind, fields = self.specialist_evidence[role]
+        evidence = next((item for item in snapshot.items if item.kind == kind), None)
+        if evidence is None:
+            return None
         serialized = to_jsonable(evidence)
         serialized["payload"] = {
             name: serialized["payload"][name] for name in fields if name in serialized["payload"]

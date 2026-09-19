@@ -59,6 +59,11 @@ class EvidenceSnapshot:
     def evidence_ids(self) -> tuple[str, ...]:
         return tuple(item.id for item in self.items)
 
+    @property
+    def mid(self) -> Decimal:
+        """Giá tham chiếu chung cho committee, không phụ thuộc sàn nào."""
+        return self.binance_mid
+
 
 def _utc_from_ms(value: int | str) -> datetime:
     return datetime.fromtimestamp(int(value) / 1000, tz=UTC)

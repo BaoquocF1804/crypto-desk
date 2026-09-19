@@ -87,7 +87,7 @@ class PortfolioSnapshot:
     as_of: str
 
 
-EvidenceKind = Literal["spot", "news", "derivatives", "reference"]
+EvidenceKind = Literal["spot", "news", "derivatives", "reference", "flow", "fundamentals"]
 
 
 @dataclass(frozen=True, slots=True)
