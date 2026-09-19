@@ -15,6 +15,7 @@ from .data import EvidenceBuilder, EvidenceError, EvidenceSnapshot
 from .domain import (
     PortfolioSnapshot,
     ResearchDecision,
+    format_pct,
     iso,
     to_jsonable,
     utcnow,
@@ -138,8 +139,7 @@ class CryptoDeskService:
             )
             committee = self._require_committee()
             reflections = tuple(
-                json.dumps(item["payload"], ensure_ascii=False)
-                for item in self.store.list_reflections(symbol)[:5]
+                render_reflection(item) for item in self.store.list_reflections(symbol)[:5]
             )
             try:
                 try:
@@ -867,6 +867,34 @@ class CryptoDeskService:
             thesis_continuity="NEW",
             prior_run_id=prior_run_id,
         )
+
+
+def render_reflection(item: dict[str, Any]) -> str:
+    """Một dòng tiếng Việt cho prompt: quyết định nào, đo trong bao lâu, kết quả ra sao.
+
+    Trước đây reflection vào prompt dưới dạng ``json.dumps(payload)`` — một túi
+    số không nhãn. Model không biết cửa sổ đo dài bao nhiêu nên đọc một con số
+    âm trên 20 ngày như bằng chứng luận điểm sai, kể cả khi luận điểm viết cho
+    horizon dài hơn. Dòng này nói thẳng cửa sổ đo.
+
+    Dòng alpha bị bỏ khi symbol chính là benchmark: alpha của nó luôn bằng 0
+    theo cấu tạo, in ra sẽ đọc như "không tạo được lợi thế" thay vì "không áp
+    dụng".
+    """
+    payload = item["payload"]
+    symbol = item["symbol"]
+    action = payload.get("decision_action") or "KHÔNG RÕ"
+    parts = [
+        f"{item['created_at'][:10]}",
+        symbol,
+        f"quyết định {action}",
+        f"sau {REFLECTION_HORIZON_DAYS} ngày: lợi nhuận "
+        f"{format_pct(payload['realized_return'])}",
+    ]
+    if symbol != BENCHMARK_SYMBOL:
+        parts.append(f"alpha so với {BENCHMARK_SYMBOL} {format_pct(payload['alpha'])}")
+    parts.append(f"sụt sâu nhất {format_pct(payload['maximum_adverse_excursion'])}")
+    return " | ".join(parts)
 
 
 def calculate_reflection(

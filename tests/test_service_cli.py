@@ -1385,3 +1385,69 @@ def test_scorecard_command_renders_table(tmp_path: Path):
     assert "20 ngày" in result.stdout
     assert "ACCUMULATE" in result.stdout
     assert "+4.00%" in result.stdout
+
+
+def test_render_reflection_states_horizon_action_and_alpha():
+    from crypto_desk.service import render_reflection
+
+    line = render_reflection(
+        {
+            "run_id": "run-1",
+            "symbol": "ETHUSDT",
+            "created_at": "2026-09-01T00:00:00+00:00",
+            "payload": {
+                "realized_return": "0.05",
+                "maximum_adverse_excursion": "-0.02",
+                "alpha": "0.04",
+                "decision_action": "ACCUMULATE",
+            },
+        }
+    )
+
+    assert "2026-09-01" in line
+    assert "ETHUSDT" in line
+    assert "ACCUMULATE" in line
+    assert "20 ngày" in line
+    assert "+5.00%" in line
+    assert "alpha so với BTCUSDT +4.00%" in line
+    assert "-2.00%" in line
+
+
+def test_render_reflection_omits_alpha_for_the_benchmark_itself():
+    from crypto_desk.service import render_reflection
+
+    line = render_reflection(
+        {
+            "run_id": "run-2",
+            "symbol": "BTCUSDT",
+            "created_at": "2026-09-01T00:00:00+00:00",
+            "payload": {
+                "realized_return": "0.05",
+                "maximum_adverse_excursion": "-0.02",
+                "alpha": "0",
+                "decision_action": "HOLD",
+            },
+        }
+    )
+
+    assert "alpha" not in line
+    assert "BTCUSDT" in line
+
+
+def test_render_reflection_handles_legacy_row_without_decision_action():
+    from crypto_desk.service import render_reflection
+
+    line = render_reflection(
+        {
+            "run_id": "run-3",
+            "symbol": "SOLUSDT",
+            "created_at": "2026-09-01T00:00:00+00:00",
+            "payload": {
+                "realized_return": "0.05",
+                "maximum_adverse_excursion": "-0.02",
+                "alpha": "0.01",
+            },
+        }
+    )
+
+    assert "KHÔNG RÕ" in line
