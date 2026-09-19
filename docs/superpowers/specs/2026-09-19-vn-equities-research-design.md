@@ -84,7 +84,33 @@ Cái giá phải trả, ghi ra để không ai bất ngờ:
 - Có "Insiders Program", hàm ý free tier bị giới hạn rate.
 - In banner quảng cáo — đã kiểm: ra **stderr**, stdout sạch, nên `desk --json` không bị hỏng JSON.
 
-Vì ba điểm đầu, evidence `fundamentals` là **tùy chọn** (bất biến 10). Một thư viện bên thứ ba không được phép làm chết cả desk.
+Và hai điều nữa, tìm ra khi đọc mã nguồn ngày 2026-09-20:
+
+- **Kéo theo 41 package**, gồm matplotlib, seaborn, mplfinance, pillow — cả một stack vẽ đồ thị, cho một CLI headless hiện chỉ có 8 dependency trực tiếp.
+- **Có `vnai`, một package telemetry bật mặc định.** Nó gửi `machine_id`, hostname, OS, môi trường chạy và vài boolean "có vẻ dùng thương mại" tới `hq.vnstocks.com`. Nó đọc `" ".join(os.environ.values())` và liệt kê tên file trong thư mục hiện tại — nhưng **chỉ để kiểm tra chuỗi con rồi suy ra boolean; giá trị biến môi trường không được truyền đi**. Không phải rò rỉ khóa, nhưng là vân tay thiết bị chạy trong đúng process giữ API key Binance mainnet. Tắt bằng `VNSTOCK_TELEMETRY=0`.
+
+### Vì thế: vnstock chạy ở process riêng, không thấy `.env`
+
+`vnstock` **không** vào `pyproject.toml` của desk. Nó sống trong venv riêng và được gọi qua một script độc lập:
+
+```
+scripts/fetch_fundamentals.py        chạy bằng .venv-fundamentals/
+  └ đọc symbol từ tham số dòng lệnh, KHÔNG load_dotenv, KHÔNG đọc .env
+  └ gọi vnstock.api.financial.Finance(symbol, source="VCI")
+  └ ghi THÔ ra data/fundamentals/<SYMBOL>.json kèm fetched_at
+       (đặt VNSTOCK_TELEMETRY=0 trước khi import)
+
+src/crypto_desk/vn_fundamentals.py   chạy trong desk
+  └ đọc file JSON đó
+  └ lọc ratio() theo ngành (bất biến 9)
+  └ trả EvidenceItem hoặc None
+```
+
+Bộ lọc theo ngành **nằm trong desk, không nằm trong script**. Đó là một tính chất an toàn; nó phải ở trong code có test, không phải trong một script chạy ngoài luồng. Script chỉ là con lấy dữ liệu thô.
+
+Đổi lại: dữ liệu cơ bản là **cache trên đĩa**, không tươi theo từng run. Chấp nhận được vì báo cáo tài chính ra theo quý. Nhưng payload phải mang `fetched_at` để model biết nó đang đọc số liệu lấy từ bao giờ, và `desk doctor` báo tuổi của cache.
+
+Vì mọi lý do trên, evidence `fundamentals` là **tùy chọn** (bất biến 10). Một thư viện bên thứ ba không được phép làm chết cả desk, càng không được ngồi chung process với khóa giao dịch.
 
 ## Bất biến bắt buộc
 
@@ -226,7 +252,8 @@ Thêm một thay đổi nữa cho bất biến 10: `_specialist_payload` đang l
 | File | Nội dung |
 |---|---|
 | `src/crypto_desk/vn_data.py` | `SSIClient` (3 endpoint, có timeout và retry như `PublicDataClient`), `VNEvidenceBuilder.build(symbol, cutoff)`, `reflection_closes(symbol, start)`, `VNEvidenceSnapshot` |
-| `src/crypto_desk/vn_fundamentals.py` | `VNFundamentals.fetch(symbol, industry) -> EvidenceItem \| None` — gọi vnstock, lọc `ratio()` theo ngành (bất biến 9), trả `None` thay vì ném khi vnstock hỏng (bất biến 10) |
+| `scripts/fetch_fundamentals.py` | Script độc lập, chạy bằng venv riêng. Không import gì từ `crypto_desk`, không đọc `.env`. Ghi thô ra `data/fundamentals/<SYMBOL>.json` |
+| `src/crypto_desk/vn_fundamentals.py` | `load_fundamentals(symbol, industry, cache_dir) -> EvidenceItem \| None` — đọc file cache, lọc `ratio()` theo ngành (bất biến 9), trả `None` khi thiếu file hoặc hỏng (bất biến 10) |
 | `src/crypto_desk/vn_prompts.py` | `VN_SPECIALISTS` (5 chuyên gia), `VN_ROLE_PROMPTS` (5 chuyên gia + bull/bear/manager bản VN), `VN_SPECIALIST_EVIDENCE`, `RATIO_WHITELIST` theo ngành |
 | `src/crypto_desk/vn_service.py` | `VNDeskService.analyze(symbol, cutoff)` — dựng evidence, gọi committee, ghi `research_runs` + artifacts, `refresh_reflections` với benchmark VN30 |
 
@@ -263,12 +290,6 @@ vn_news_feeds:
   - https://vietstock.vn/144/chung-khoan/co-phieu.rss
 ```
 
-Dependency mới trong `pyproject.toml`, ghim phiên bản chính xác như mọi dependency khác của repo:
-
-```
-"vnstock==<phiên bản đang cài lúc thực thi>",
-```
-
 Hằng số: `VN_BENCHMARK_SYMBOL = "VN30"`, `VN_V1_SYMBOLS = frozenset({"FPT","MBB"})`.
 
 `vn_symbols` **không** đi qua `endswith("USDT")` hay `V1_SYMBOLS`; validate riêng theo `VN_V1_SYMBOLS`.
@@ -285,8 +306,8 @@ desk vn-analyze FPT
       │                   closeRaw      ─┘
       ├ RSS CafeF/Vietstock → news items
       ├ company-profile → industryName (phân loại ngành cho bất biến 9)
-      ├ vnstock → income_statement + balance_sheet + ratio(đã lọc theo ngành)
-      │            hỏng → bỏ qua, KHÔNG ném (bất biến 10)
+      ├ data/fundamentals/FPT.json → lọc ratio() theo ngành (bất biến 9)
+      │            thiếu file / hỏng → bỏ qua, KHÔNG ném (bất biến 10)
       └ kiểm phiên gần nhất đã đóng → không thì EvidenceError
   └ CryptoCommittee.run(snapshot, specialists=VN_SPECIALISTS, ...)
       technical / liquidity / news / flow / cơ bản → bull ⇄ bear ×2 → manager
@@ -316,7 +337,7 @@ Theo đúng nguyên tắc sẵn có của desk: **thà không ra gì còn hơn r
 | SSI lỗi mạng / 5xx | retry rồi `EvidenceError` → `NO_TRADE` |
 | Tất cả RSS feed hỏng | `EvidenceError` — cùng cách desk crypto xử `news_feeds` rỗng |
 | Chuỗi giá < số phiên cần | `EvidenceError`, không suy đoán bù |
-| **vnstock lỗi / rate limit / đổi API** | **bỏ qua chuyên gia cơ bản, run vẫn chạy**, báo cáo ghi rõ ở đầu là thiếu phần cơ bản |
+| **Thiếu hoặc hỏng `data/fundamentals/<SYMBOL>.json`** | **bỏ qua chuyên gia cơ bản, run vẫn chạy**, báo cáo ghi rõ ở đầu là thiếu phần cơ bản |
 | `industryName` không đọc được | bỏ qua chuyên gia cơ bản — không đoán ngành để lọc chỉ tiêu |
 
 Mọi dòng trên đều kết thúc bằng `NO_TRADE` được ghi vào `research_runs` — nhưng **không dòng nào trong số đó được sinh reflection** (bất biến 7). Chỉ run mang `decided: true` mới vào bảng chấm điểm. Đọc bảng này mà quên điều đó là tái tạo đúng lỗi đang có trong dữ liệu hôm nay.
@@ -336,13 +357,15 @@ Bắt buộc, ngoài test đơn vị thông thường:
 9. **`unreflected_runs` lọc theo symbol** — trộn run `BTCUSDT` và `FPT` trong cùng bảng, khẳng định truy vấn với `settings.symbols` không trả về `FPT` và ngược lại. Bảo vệ khỏi lỗi nuốt im lặng.
 10. **Prompt manager VN không mời REDUCE/EXIT** — khẳng định chuỗi prompt chỉ liệt kê ACCUMULATE, HOLD, NO_TRADE. Bảo vệ bất biến 8.
 11. **Chỉ tiêu ngân hàng bị loại khỏi payload của FPT** — fixture `ratio()` có `Nợ xấu (%) = 0.0` cho FPT, khẳng định khoá đó **không tồn tại** trong payload gửi model, chứ không phải bằng 0. Chiều ngược lại: `Số ngày tồn kho` bị loại khỏi payload của MBB. Bảo vệ bất biến 9 — đây là test quan trọng nhất của phần cơ bản.
-12. **vnstock hỏng không làm chết run** — cho `VNFundamentals.fetch` ném, khẳng định `build()` vẫn trả snapshot, `fundamentals` không có trong `items`, và committee vẫn chạy với bốn chuyên gia còn lại.
+12. **Thiếu cache không làm chết run** — trỏ `cache_dir` vào thư mục rỗng, khẳng định `build()` vẫn trả snapshot, `fundamentals` không có trong `items`, và committee vẫn chạy với bốn chuyên gia còn lại. Lặp lại với một file JSON hỏng cú pháp.
+14. **Script không chạm `.env`** — `grep` mã nguồn `scripts/fetch_fundamentals.py`, khẳng định không có `load_dotenv`, không `import crypto_desk`, và có đặt `VNSTOCK_TELEMETRY`. Test rẻ, giữ cho tính chất cách ly không bị xói mòn ở lần sửa sau.
 13. **Báo cáo nói rõ khi thiếu phần cơ bản** — khẳng định `report.md` chứa dòng cảnh báo khi `skipped_specialists` không rỗng. Thiếu im lặng là thứ bất biến 10 cấm.
 
 ## Không làm ở V1
 
 - **REDUCE và EXIT trên đường VN** (bất biến 8). Không có nguồn vị thế cho cổ phiếu nên hai action này luôn bị `_validate_manager` từ chối; prompt VN vì thế không mời chúng. Gỡ được khi có chỗ để người dùng khai danh mục VN.
 - **Screener cho VN.** `screen()` hiện tại đọc `quote_volume` và `spread` với ngưỡng crypto. `vn-daily` chạy thẳng cả `vn_symbols` không lọc.
+- **Tự động chạy `fetch_fundamentals.py`.** V1 chạy tay hoặc bằng cron riêng. Cho `desk vn-daily` gọi nó qua subprocess sẽ kéo môi trường của desk sang process con, phá đúng tính chất cách ly vừa dựng. `desk doctor` báo tuổi cache để biết khi nào cần chạy lại.
 
 - Đặt lệnh, sinh phiếu lệnh, sizing theo VND. Không đụng `risk.py` / `execution.py` / `broker.py`.
 - Sổ lệnh mức 1-10 (SSI iboard không cho công khai). Chuyên gia liquidity làm việc với khối lượng khớp và số lệnh.
