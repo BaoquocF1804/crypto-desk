@@ -342,12 +342,76 @@ def test_serialized_payload_has_no_forbidden_keys(tmp_path: Path):
 def test_symbols_are_returned_in_configured_order(tmp_path: Path):
     store = Store(tmp_path / "crypto.db")
     settings = make_settings(
-        symbols=("ETHUSDT", "BTCUSDT"), coingecko_ids={"ETHUSDT": "ethereum", "BTCUSDT": "bitcoin"}
+        symbols=("ETHUSDT", "BTCUSDT"),
+        coingecko_ids={"ETHUSDT": "ethereum", "BTCUSDT": "bitcoin"},
+        vn_symbols=("FPT", "MBB"),
     )
 
     snapshot = build_dashboard_snapshot(settings, store)
 
-    assert [item.symbol for item in snapshot.symbols] == ["ETHUSDT", "BTCUSDT"]
+    assert [item.symbol for item in snapshot.symbols] == ["ETHUSDT", "BTCUSDT", "FPT", "MBB"]
+
+
+def test_dashboard_snapshot_includes_vn_equities_with_evidence(tmp_path: Path):
+    store = Store(tmp_path / "crypto.db")
+    settings = make_settings(
+        symbols=("BTCUSDT",),
+        vn_symbols=("FPT",),
+    )
+    report_dir = tmp_path / "reports" / "r1"
+    report_dir.mkdir(parents=True)
+    (report_dir / "evidence.json").write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "kind": "spot",
+                        "payload": {
+                            "symbol": "FPT",
+                            "mid": "71700",
+                            "ref_price": "74300",
+                            "daily_closes": ["70000", "71000", "71700"],
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (report_dir / "analysts.json").write_text(
+        json.dumps(
+            {
+                "flow": {
+                    "stance": "bullish",
+                    "confidence": "8",
+                    "observations": ["Khối ngoại mua ròng mạnh"],
+                },
+                "fundamentals": {
+                    "stance": "bullish",
+                    "confidence": "7.5",
+                    "observations": ["Biên lợi nhuận gộp cao"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    store.save_run(
+        "r1",
+        "2026-09-20T00:00:00+00:00",
+        make_decision(symbol="FPT", action="HOLD"),
+        report_dir,
+    )
+
+    snapshot = build_dashboard_snapshot(settings, store)
+
+    fpt = next(s for s in snapshot.symbols if s.symbol == "FPT")
+    assert fpt.mark_usdt == Decimal("71700")
+    assert fpt.change_24h_pct == Decimal("-3.50")
+    assert fpt.sparkline_closes == [Decimal("70000"), Decimal("71000"), Decimal("71700")]
+    assert fpt.committee_evaluation is not None
+    assert any(vote.role == "flow" for vote in fpt.committee_evaluation.member_votes)
+    assert any(vote.role == "fundamentals" for vote in fpt.committee_evaluation.member_votes)
+
 
 
 def make_ticket(symbol: str = "BTCUSDT") -> Any:

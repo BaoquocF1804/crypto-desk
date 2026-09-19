@@ -23,9 +23,13 @@ COMMAND_KINDS = (
     "reflections",
     "preview",
     "execute",
+    "vn-analyze",
+    "vn-daily",
 )
 EXECUTION_KINDS = frozenset({"preview", "execute"})
-STATE_CHANGING_KINDS = frozenset({"sync", "analyze", "daily", "health", "execute"})
+STATE_CHANGING_KINDS = frozenset(
+    {"sync", "analyze", "daily", "health", "execute", "vn-analyze", "vn-daily"}
+)
 
 MAX_ARGS_BYTES = 4096
 MAX_RESULT_BYTES = 32768
@@ -47,7 +51,7 @@ FORBIDDEN_RESULT_KEYS = frozenset(
 )
 
 _TICKET_ID_PATTERN = re.compile(r"^[A-Za-z0-9-]{1,64}$")
-_SYMBOL_PATTERN = re.compile(r"^[A-Z]{2,10}USDT$")
+_SYMBOL_PATTERN = re.compile(r"^[A-Z0-9]{2,10}$")
 
 ExecutionAction = Literal["approve", "reject", "reconcile"]
 ExecutionMode = Literal["TESTNET_ORDER", "DRY_RUN"]
@@ -176,6 +180,8 @@ _ARGS_MODELS: dict[str, type[_Args]] = {
     "reflections": ReflectionsArgs,
     "preview": PreviewArgs,
     "execute": ExecuteArgs,
+    "vn-analyze": AnalyzeArgs,
+    "vn-daily": EmptyArgs,
 }
 
 

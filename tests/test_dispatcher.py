@@ -491,3 +491,69 @@ def test_execution_validation_error_becomes_safe_code(
             operator_email=OPERATOR,
         )
     assert excinfo.value.code == "VALIDATION_FAILED"
+
+
+def test_dispatch_analyze_routes_vn_symbol(tmp_path: Path, monkeypatch):
+    from crypto_desk.domain import ResearchDecision
+    from crypto_desk.service import AnalysisRun
+
+    settings = Settings(
+        database=tmp_path / "crypto.sqlite3",
+        artifacts=tmp_path / "artifacts",
+        symbols=("BTCUSDT",),
+        vn_symbols=("FPT",),
+    )
+    dispatcher = CommandDispatcher(settings)
+
+    class FakeVnService:
+        def analyze(self, symbol: str):
+            assert symbol == "FPT"
+            decision = ResearchDecision(
+                symbol=symbol,
+                action="HOLD",
+                conviction=Decimal("7"),
+                bull_case="bull",
+                bear_case="bear",
+                catalysts=(),
+                invalidation="inv",
+                entry=None,
+                stop=None,
+                target=None,
+                evidence_ids=("ev-1",),
+                reason="Quyết định của hội đồng.",
+                decided=True,
+            )
+            return AnalysisRun(
+                run_id="run-vn-1",
+                cutoff="2026-09-20T00:15:00Z",
+                decision=decision,
+                current_price=Decimal("71700"),
+                report_dir=tmp_path / "report",
+                ticket_id=None,
+            )
+
+        def daily(self, *, due=False, catch_up=False):
+            return {
+                "status": "COMPLETED",
+                "bucket": "2026-09-20",
+                "run_ids": ["run-vn-1"],
+            }
+
+    import crypto_desk.cli
+
+    monkeypatch.setattr(crypto_desk.cli, "_vn_service", lambda s: FakeVnService())
+
+    # analyze FPT routes to VN service
+    res1 = dispatcher.dispatch("analyze", {"symbol": "FPT"}, operator_email=OPERATOR)
+    assert res1.run_id == "run-vn-1"
+    assert res1.current_price == "71700"
+
+    # vn-analyze FPT routes to VN service
+    res2 = dispatcher.dispatch("vn-analyze", {"symbol": "FPT"}, operator_email=OPERATOR)
+    assert res2.run_id == "run-vn-1"
+
+    # vn-daily routes to VN service
+    res3 = dispatcher.dispatch("vn-daily", {}, operator_email=OPERATOR)
+    assert res3.status == "COMPLETED"
+    assert res3.bucket == "2026-09-20"
+

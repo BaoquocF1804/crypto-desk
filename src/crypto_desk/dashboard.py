@@ -292,7 +292,10 @@ def _build_symbols(
     priced_by_symbol: dict[str, _PricedShare],
 ) -> list[SymbolSection]:
     results: list[SymbolSection] = []
-    for symbol in settings.symbols:
+    all_symbols = list(settings.symbols) + [
+        s for s in getattr(settings, "vn_symbols", ()) if s not in settings.symbols
+    ]
+    for symbol in all_symbols:
         priced = priced_by_symbol.get(symbol)
 
         latest_attempt_row = store.latest_run(symbol)
@@ -392,7 +395,15 @@ def _evidence_change_24h_pct(evidence: dict[str, object] | None) -> Decimal | No
     try:
         items = evidence.get("items") or []
         spot = next(item for item in items if item.get("kind") == "spot")
-        return Decimal(str(spot["payload"]["change_24h_pct"]))
+        payload = spot.get("payload") or {}
+        if "change_24h_pct" in payload and payload["change_24h_pct"] is not None:
+            return Decimal(str(payload["change_24h_pct"]))
+        if "ref_price" in payload and "mid" in payload:
+            ref = Decimal(str(payload["ref_price"]))
+            mid = Decimal(str(payload["mid"]))
+            if ref > 0:
+                return ((mid - ref) / ref * Decimal("100")).quantize(Decimal("0.01"))
+        return None
     except (ValueError, KeyError, TypeError, StopIteration):
         return None
 
@@ -403,10 +414,14 @@ def _evidence_sparkline_closes(
     if not evidence:
         return []
     try:
-        closes = evidence.get("four_hour_closes") or evidence.get("daily_closes") or []
+        closes = evidence.get("four_hour_closes") or evidence.get("daily_closes")
+        if not closes:
+            items = evidence.get("items") or []
+            spot = next(item for item in items if item.get("kind") == "spot")
+            closes = spot.get("payload", {}).get("daily_closes", [])
         selected = closes[-limit:] if len(closes) > limit else closes
         return [Decimal(str(c)) for c in selected]
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, StopIteration):
         return []
 
 
@@ -440,6 +455,8 @@ ROLES_METADATA = {
     "derivatives": "Chuyên viên Phái sinh (Binance Futures)",
     "news": "Chuyên viên Tin tức & Vĩ mô",
     "liquidity": "Chuyên viên Thanh khoản & Sổ lệnh",
+    "flow": "Chuyên viên Dòng tiền & Khối ngoại",
+    "fundamentals": "Chuyên viên Phân tích Cơ bản",
     "bull_round_2": "Tranh biện Bull (Phe Mua)",
     "bear_round_2": "Tranh biện Bear (Phe Bán)",
 }
@@ -550,6 +567,7 @@ def _build_health(
     store: Store,
     now: datetime,
     symbols: list[SymbolSection],
+    settings: Settings | None = None,
 ) -> HealthStatus:
     scheduled = store.latest_scheduled_run("health")
     last_health_at = scheduled["completed_at"] if scheduled else None
@@ -565,12 +583,20 @@ def _build_health(
         else:
             runner_state = "offline"
 
+    crypto_symbols = (
+        set(settings.symbols)
+        if settings
+        else {s.symbol for s in symbols if s.symbol.endswith("USDT")}
+    )
     alerts = [
         f"research_freshness:{item.symbol}"
         for item in symbols
-        if item.latest_attempt is None
-        or item.latest_attempt.state == "blocked"
-        or item.latest_valid_decision is None
+        if item.symbol in crypto_symbols
+        and (
+            item.latest_attempt is None
+            or item.latest_attempt.state == "blocked"
+            or item.latest_valid_decision is None
+        )
     ]
     research_state: HealthState = "degraded" if alerts else "online"
 
@@ -666,7 +692,7 @@ def build_dashboard_snapshot(
     )
 
     symbols = _build_symbols(settings, store, priced_by_symbol)
-    health = _build_health(store, current, symbols)
+    health = _build_health(store, current, symbols, settings=settings)
     operations = _build_operations(store, environment)
 
     return DashboardSnapshot(

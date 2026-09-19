@@ -144,7 +144,9 @@ def vn_analyze(ctx: typer.Context, symbol: str) -> None:
     normalized = symbol.upper()
     if normalized not in settings.vn_symbols:
         _fail("Symbol is outside the configured VN allowlist")
-    _emit(ctx, _vn_service(settings).analyze(normalized))
+    result = _vn_service(settings).analyze(normalized)
+    _publish_dashboard_if_configured(settings)
+    _emit(ctx, result)
 
 
 @app.command("vn-daily")
@@ -154,7 +156,10 @@ def vn_daily(
     catch_up: Annotated[bool, typer.Option("--catch-up")] = False,
 ) -> None:
     settings = _load(ctx)
-    _emit(ctx, _vn_service(settings).daily(due=due, catch_up=catch_up))
+    result = _vn_service(settings).daily(due=due, catch_up=catch_up)
+    if result.get("status") == "COMPLETED":
+        _publish_dashboard_if_configured(settings)
+    _emit(ctx, result)
 
 
 @app.command()

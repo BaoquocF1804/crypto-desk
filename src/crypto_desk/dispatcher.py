@@ -109,7 +109,7 @@ class CommandDispatcher:
             parsed = parse_args(kind, args)
         except ValueError as exc:
             raise DispatchError("INVALID_COMMAND", str(exc)) from None
-        handler = getattr(self, f"_dispatch_{kind}", None)
+        handler = getattr(self, f"_dispatch_{kind.replace('-', '_')}", None)
         if handler is None:
             raise DispatchError("INVALID_COMMAND")
         return handler(parsed, operator_email)
@@ -195,12 +195,17 @@ class CommandDispatcher:
         operator_email: str,
     ) -> SafeAnalyzeResult:
         del operator_email
-        if args.symbol not in self.settings.symbols:
+        if args.symbol in getattr(self.settings, "vn_symbols", ()):
+            from .cli import _vn_service
+
+            run = _vn_service(self.settings).analyze(args.symbol)
+        elif args.symbol in self.settings.symbols:
+            run = self._service().analyze(args.symbol)
+        else:
             raise DispatchError(
                 "VALIDATION_FAILED",
                 "Symbol is outside the configured allowlist",
             )
-        run = self._service().analyze(args.symbol)
         decision = run.decision
         return SafeAnalyzeResult(
             run_id=run.run_id,
@@ -214,6 +219,29 @@ class CommandDispatcher:
             target=(None if decision.target is None else str(decision.target)),
             current_price=(None if run.current_price is None else str(run.current_price)),
             ticket_id=run.ticket_id,
+        )
+
+    def _dispatch_vn_analyze(
+        self,
+        args: AnalyzeArgs,
+        operator_email: str,
+    ) -> SafeAnalyzeResult:
+        return self._dispatch_analyze(args, operator_email)
+
+    def _dispatch_vn_daily(
+        self,
+        args: Any,
+        operator_email: str,
+    ) -> SafeDailyResult:
+        del args, operator_email
+        from .cli import _vn_service
+
+        result = _vn_service(self.settings).daily(due=False, catch_up=False)
+        return SafeDailyResult(
+            status=str(result["status"]),
+            bucket=str(result["bucket"]),
+            run_ids=[str(run_id) for run_id in result.get("run_ids", [])],
+            screen=[],
         )
 
     def _dispatch_daily(
