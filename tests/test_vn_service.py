@@ -119,9 +119,7 @@ def test_a_missing_fundamentals_cache_still_produces_a_run_and_says_so(tmp_path)
                 skipped_specialists=("fundamentals",),
             )
 
-    service = VNDeskService(
-        settings, store, evidence_builder=_Builder(), committee=_Committee()
-    )
+    service = VNDeskService(settings, store, evidence_builder=_Builder(), committee=_Committee())
     try:
         run = service.analyze("FPT")
         report = (run.report_dir / "report.md").read_text(encoding="utf-8")
@@ -171,9 +169,7 @@ def test_vn_decision_strips_futures_bias_and_setups_from_committee(tmp_path):
                 skipped_specialists=(),
             )
 
-    service = VNDeskService(
-        settings, store, evidence_builder=_Builder(), committee=_Committee()
-    )
+    service = VNDeskService(settings, store, evidence_builder=_Builder(), committee=_Committee())
     try:
         run = service.analyze("FPT")
     finally:
@@ -188,7 +184,7 @@ def test_vn_decision_strips_futures_bias_and_setups_from_committee(tmp_path):
 
 def test_committee_runs_with_missing_optional_fundamentals():
     """Bất biến 10: CryptoCommittee thật chạy bình thường khi thiếu fundamentals."""
-    from crypto_desk.committee import AnalystReport, CryptoCommittee
+    from crypto_desk.committee import AnalystReport, CryptoCommittee, VNManagerDecision
     from crypto_desk.vn_prompts import (
         VN_OPTIONAL_KINDS,
         VN_ROLE_PROMPTS,
@@ -210,6 +206,7 @@ def test_committee_runs_with_missing_optional_fundamentals():
             return {
                 "action": "HOLD",
                 "conviction": "5",
+                "decision_reason": "Only 4/5 specialist reports are available; no defensible R:R.",
                 "bull_case": "ok",
                 "bear_case": "ok",
                 "catalysts": [],
@@ -218,8 +215,6 @@ def test_committee_runs_with_missing_optional_fundamentals():
                 "stop": None,
                 "target": None,
                 "evidence_ids": evidence_ids,
-                "futures_bias": "NEUTRAL",
-                "futures_setups": [],
             }
 
     committee = CryptoCommittee(
@@ -229,11 +224,13 @@ def test_committee_runs_with_missing_optional_fundamentals():
         specialist_evidence=VN_SPECIALIST_EVIDENCE,
         optional_kinds=VN_OPTIONAL_KINDS,
         mid_label="giá khớp SSI",
+        manager_model=VNManagerDecision,
     )
     snapshot = make_vn_snapshot("FPT")  # 4 items bắt buộc, KHÔNG có fundamentals
     result = committee.run(snapshot)
 
     assert result.decision.action == "HOLD"
+    assert result.decision.reason == "Only 4/5 specialist reports are available; no defensible R:R."
     assert "fundamentals" in result.skipped_specialists
 
 
@@ -312,6 +309,7 @@ def test_vn_technical_evidence_includes_close_raw():
     assert "close_raw" in fields
     assert "mid" in fields
     assert "daily_closes" in fields
+    assert {"ref_price", "avg_price", "floor_price", "ceiling_price"} <= set(fields)
 
 
 def test_vn_service_builds_and_passes_prior_thesis_to_committee(tmp_path):
@@ -355,9 +353,7 @@ def test_vn_service_builds_and_passes_prior_thesis_to_committee(tmp_path):
                 skipped_specialists=(),
             )
 
-    service = VNDeskService(
-        settings, store, evidence_builder=_Builder(), committee=_Committee()
-    )
+    service = VNDeskService(settings, store, evidence_builder=_Builder(), committee=_Committee())
     try:
         run = service.analyze("FPT", NOW)
     finally:
@@ -389,6 +385,7 @@ def test_vn_committee_with_vn_manager_decision_model():
             return {
                 "action": "ACCUMULATE",
                 "conviction": "8",
+                "decision_reason": "Raw VND setup has gross R:R (115-100)/(100-95) = 3.0.",
                 "bull_case": "Solid fundamentals and technical setup",
                 "bear_case": "Market volatility",
                 "catalysts": ["Earnings release"],
@@ -414,6 +411,83 @@ def test_vn_committee_with_vn_manager_decision_model():
 
     assert result.decision.action == "ACCUMULATE"
     assert result.decision.conviction == Decimal("8")
+    assert "R:R" in result.decision.reason
     assert result.decision.futures_bias is None
     assert result.decision.futures_setups == ()
 
+
+def test_vn_prompts_bind_all_roles_to_snapshot_and_raw_price_scale():
+    for role, prompt in VN_ROLE_PROMPTS.items():
+        assert "only source of market facts" in prompt, role
+        assert "daily_closes are split-adjusted" in prompt, role
+        assert "raw matched price in VND" in prompt, role
+        assert "If a field is missing" in prompt, role
+    for role in ("bull", "bear"):
+        assert "asymmetry" in VN_ROLE_PROMPTS[role]
+        assert "invalidat" in VN_ROLE_PROMPTS[role]
+    manager = VN_ROLE_PROMPTS["manager"]
+    assert "(target - entry) / (entry - stop)" in manager
+    assert "R:R >= 1.5" in manager
+    assert "decision_reason" in manager
+
+
+def test_vn_accumulate_requires_raw_entry_and_minimum_gross_reward_risk():
+    from crypto_desk.committee import AnalystReport, CryptoCommittee, VNManagerDecision
+
+    class _Model:
+        def __init__(self, entry: str, stop: str, target: str):
+            self.entry, self.stop, self.target = entry, stop, target
+            self.manager_calls = 0
+
+        def generate(self, **kwargs):
+            ids = kwargs["payload"]["evidence_ids"]
+            if kwargs["response_model"] is AnalystReport:
+                return {
+                    "stance": "neutral",
+                    "confidence": "4",
+                    "observations": ["Evidence is mixed"],
+                    "risks": ["The raw target may be unsupported"],
+                    "evidence_ids": ids,
+                }
+            self.manager_calls += 1
+            return {
+                "action": "ACCUMULATE",
+                "conviction": "7",
+                "decision_reason": "Proposed raw VND setup, subject to R:R gate.",
+                "bull_case": "Potential upside",
+                "bear_case": "Downside risk",
+                "catalysts": [],
+                "invalidation": "Raw stop breached",
+                "entry": self.entry,
+                "stop": self.stop,
+                "target": self.target,
+                "evidence_ids": ids,
+            }
+
+    def run(entry: str, stop: str, target: str):
+        model = _Model(entry, stop, target)
+        committee = CryptoCommittee(
+            model,
+            specialists=VN_SPECIALISTS,
+            role_prompts=VN_ROLE_PROMPTS,
+            specialist_evidence=VN_SPECIALIST_EVIDENCE,
+            optional_kinds=VN_OPTIONAL_KINDS,
+            manager_model=VNManagerDecision,
+            mid_label="raw SSI mid",
+        )
+        return model, committee.run(make_vn_snapshot())
+
+    model, result = run("100", "90", "115")  # gross R:R = 1.5, inclusive boundary
+    assert result.decision.action == "ACCUMULATE"
+    assert "Computed gross R:R: (115 - 100) / (100 - 90) = 1.50" in result.decision.reason
+    assert model.manager_calls == 1
+
+    model, result = run("100", "90", "114")  # gross R:R = 1.4
+    assert result.decision.action == "NO_TRADE"
+    assert "R:R" in result.decision.reason
+    assert model.manager_calls == 2
+
+    model, result = run("50", "45", "60")  # adjusted close used as entry vs raw mid 100
+    assert result.decision.action == "NO_TRADE"
+    assert "deviates" in result.decision.reason
+    assert model.manager_calls == 2

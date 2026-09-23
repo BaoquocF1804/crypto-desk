@@ -16,21 +16,26 @@
 - Mọi số tiền và tỉ lệ dùng `Decimal`, không `float`.
 - Dataclass mới: `@dataclass(frozen=True, slots=True)`.
 - Mọi file `.py` mở đầu bằng `from __future__ import annotations`.
-- Văn bản hướng tới người dùng và hướng tới model: **tiếng Việt có dấu**. Giữ nguyên JSON key, enum, symbol, evidence ID.
-- Không đụng `risk.py`, `broker.py`, `store.py`, `dispatcher.py`, `runner.py`.
+- Văn bản hướng tới người dùng: **tiếng Việt có dấu**. Đối với model: Crypto Committee tuân thủ `BASE_OUTPUT_CONTRACT` (tiếng Anh) tại `committee.py:23`; VN Equities Desk tuân thủ prompt tiếng Việt tại `vn_prompts.py`. Giữ nguyên JSON key, enum, symbol, evidence ID.
+- Không đụng `risk.py`, `broker.py`, `store.py`, `runner.py`. Cho phép sửa `dispatcher.py` (để cấp broker cho analyze/daily) và `execution.py` (để thống nhất mẫu số tính độ lệch giá theo `quote.mid`).
 - Không đổi schema SQLite.
 - Chạy test: `uv run pytest`. Lint: `uv run ruff check src tests`.
-- Baseline tại `ae17034`: **332 passed**, ruff sạch. Sau Task 5 phải là **345 passed** (332 + 13 test mới; test bị sửa trong Task 3 được đổi tên và đổi khẳng định, không bị xoá).
+- Baseline tại `79a5aa4`: **336 passed**, ruff sạch. Sau Task 5 phải là **352 passed** (336 + 16 test mới/bổ sung biên; test bị sửa trong Task 3 được đổi tên và đổi khẳng định, không bị xoá).
 
 ## Review Focus
 
-Năm lớp đầu vào spec ngụ ý nhưng không task nào tự nhiên chạm tới. Mỗi dòng đã được gắn test vào task sở hữu đoạn mã đó.
+Mười lớp đầu vào và ranh giới hệ thống cần đảm bảo trong toàn bộ plan:
 
 1. `sync()` ném lỗi giữa `analyze` (mạng chập, key hết hạn) — run vẫn phải ghi đủ artifact và trả `AnalysisRun`; ticket là hệ quả của nghiên cứu, không phải điều kiện của nó. → Task 1, Step 11.
 2. Broker trả snapshot của môi trường khác (`mainnet` trong lúc config là `testnet`) — không được dùng để đúc ticket. Lớp chặn này đang có ở `_create_ticket` và không được rơi mất khi tách hàm. → Task 1, Step 13.
-3. Lỗi 429 ở stage **specialist** chứ không phải manager — run phải đi tiếp và không mất report của các stage đã xong. → Task 2, Step 7.
-4. Entry lệch **đúng bằng** ngưỡng — phải được chấp nhận. Phép so sánh là `>`, không phải `>=`; sửa nhầm ở đây làm hỏng đúng biên mà hội đồng hay chạm. → Task 4, Step 7.
-5. News item thiếu `title` (feed hỏng, phần tử rỗng) — hàm gắn nhãn không được ném. Một RSS lỗi không được quyền quyết định desk có chạy hay không. → Task 5, Step 7.
+3. Snapshot vừa `sync()` cũng phải được kiểm tra độ mới (`as_of <= now` và `<= 5 phút`), tránh trường hợp `updateTime` từ Binance là thời điểm quá khứ xa hoặc ở tương lai. → Task 1, Step 3 & Step 14.
+4. Thiếu Binance credentials không được làm crash `analyze` và `daily` ở CLI/Dispatcher trước khi run bắt đầu; xử lý fallback an toàn (`selected_broker = None`) tại ranh giới `_service`. → Task 1, Step 7 & Step 15.
+5. Đường lệnh từ Dashboard qua `dispatcher.py` phải cấp `broker=True` cho `analyze` và `daily` để tự động sync portfolio khi cần. → Task 1, Step 7 & Step 16.
+6. Lỗi 429 ở stage **specialist** chứ không phải manager — run phải đi tiếp và không mất report của các stage đã xong. → Task 2, Step 7.
+7. `daily()` catch-up hoặc trigger trước 00:15 UTC với bucket quá khứ (`target_date < now.date()`) phải luôn đi nhánh `REFLECTIONS_ONLY`, không chạy live screen/analyze trên bucket hôm qua. → Task 3, Step 3 & Step 7.
+8. Hai tầng Committee và Execution phải dùng cùng một mẫu số tính độ lệch giá (`quote.mid` / `snapshot_mid`); hỗ trợ và test đầy đủ cho cả **biên dưới** (BUY limit discount). → Task 4, Step 4, Step 4b & Step 8.
+9. Entry lệch **đúng bằng** ngưỡng — phải được chấp nhận. Phép so sánh là `>`, không phải `>=`; sửa nhầm ở đây làm hỏng đúng biên mà hội đồng hay chạm. → Task 4, Step 7.
+10. News item thiếu `title` (feed hỏng, phần tử rỗng) — hàm gắn nhãn không được ném. Một RSS lỗi không được quyền quyết định desk có chạy hay không. → Task 5, Step 7.
 
 ---
 
@@ -38,14 +43,18 @@ Năm lớp đầu vào spec ngụ ý nhưng không task nào tự nhiên chạm 
 
 | File | Trách nhiệm sau plan | Task |
 |---|---|---|
-| `src/crypto_desk/service.py` | `_fresh_portfolio` mới; `_create_ticket` trả tuple; `analyze` ghi `ticket_blocked.json`; `daily` chạy live và tách nhánh backfill | 1, 3 |
-| `src/crypto_desk/cli.py` | `analyze` và `daily` dựng service có broker; hai factory truyền `max_entry_deviation` | 1, 4 |
+| `src/crypto_desk/service.py` | `_fresh_portfolio` mới (kiểm tra độ mới cho cả cached và sync); `_create_ticket` trả tuple; `analyze` ghi `ticket_blocked.json`; `daily` chạy live và tách nhánh backfill | 1, 3 |
+| `src/crypto_desk/cli.py` | `analyze` và `daily` dựng service có broker với graceful degradation; hai factory truyền `max_entry_deviation` | 1, 4 |
+| `src/crypto_desk/dispatcher.py` | `_dispatch_analyze` và `_dispatch_daily` truyền `broker=True` để tự sync tạo ticket | 1 |
+| `src/crypto_desk/execution.py` | Đổi mẫu số đo độ lệch giá sang `quote.mid` đồng bộ với committee | 4 |
 | `src/crypto_desk/committee.py` | `_call` retry lỗi nhất thời; ngưỡng lệch entry thành tham số; prompt `news` mô tả nhãn `relevance`; `SPECIALIST_EVIDENCE` nhận thêm `symbol_news_count` | 2, 4, 5 |
 | `src/crypto_desk/data.py` | `tag_news_relevance` mới; `news_payload` mang nhãn và đếm | 5 |
 | `src/crypto_desk/vn_data.py` | `news_item` dùng chung `tag_news_relevance` | 5 |
 | `src/crypto_desk/vn_prompts.py` | prompt `news` và `VN_SPECIALIST_EVIDENCE` khớp với nhãn mới | 5 |
-| `tests/test_service_cli.py` | test ticket bị chặn, sync tự động, daily live, daily backfill | 1, 3 |
-| `tests/test_committee.py` | test retry, test ngưỡng lệch entry | 2, 4 |
+| `tests/test_service_cli.py` | test ticket bị chặn, sync tự động, độ mới snapshot, graceful fallback khi thiếu key, daily live, daily backfill | 1, 3 |
+| `tests/test_dispatcher.py` | test dispatcher analyze và daily cấp broker để tạo ticket | 1 |
+| `tests/test_execution.py` | test độ lệch giá dùng `quote.mid`, test biên dưới | 4 |
+| `tests/test_committee.py` | test retry, test ngưỡng lệch entry biên trên và biên dưới | 2, 4 |
 | `tests/test_data.py` | test gắn nhãn news | 5 |
 
 ---
@@ -56,12 +65,14 @@ Năm lớp đầu vào spec ngụ ý nhưng không task nào tự nhiên chạm 
 - Modify: `src/crypto_desk/service.py:202` (call site trong `analyze`)
 - Modify: `src/crypto_desk/service.py:509-596` (`_create_ticket`)
 - Modify: `src/crypto_desk/service.py:496` (chèn `_fresh_portfolio` ngay trước `_position_quantity`)
-- Modify: `src/crypto_desk/cli.py:123`, `src/crypto_desk/cli.py:136`
-- Test: `tests/test_service_cli.py`
+- Modify: `src/crypto_desk/cli.py:123`, `src/crypto_desk/cli.py:136`, `src/crypto_desk/cli.py:570` (cấp broker cho analyze/daily, fallback an toàn khi thiếu key)
+- Modify: `src/crypto_desk/dispatcher.py:203`, `src/crypto_desk/dispatcher.py:253` (cấp broker cho analyze và daily từ dashboard)
+- Test: `tests/test_service_cli.py`, `tests/test_dispatcher.py`
 
 **Interfaces:**
 - Consumes: `CryptoDeskService.sync() -> PortfolioSnapshot` (đã có, [service.py:60](../../../src/crypto_desk/service.py)); `Store.latest_snapshot(environment: str) -> PortfolioSnapshot | None`.
 - Produces:
+  - `CryptoDeskService._is_snapshot_fresh(snapshot: PortfolioSnapshot | None, target_env: str, now: datetime) -> bool` — kiểm tra snapshot hợp lệ và `as_of <= now and (now - as_of) <= timedelta(minutes=5)`.
   - `CryptoDeskService._fresh_portfolio(self, now: datetime) -> PortfolioSnapshot | None`
   - `CryptoDeskService._create_ticket(self, decision: ResearchDecision, evidence: EvidenceSnapshot | None, cutoff: datetime) -> tuple[str | None, str | None]` — `(ticket_id, blocked_reason)`. Đúng một trong hai phần tử khác `None`, trừ trường hợp action không actionable thì cả hai đều `None`.
   - Artifact mới `ticket_blocked.json` với hình dạng `{"reason": "<mã lý do>"}`. Các mã: `cutoff_outside_5min_window`, `no_portfolio_snapshot_within_5min`, `unpriced_positions_block_accumulate`, `decision_missing_entry_or_stop`, `protection_order_list_ambiguous`, `sizing:<thông điệp ValueError>`.
@@ -105,11 +116,25 @@ def test_accumulate_syncs_the_portfolio_when_the_stored_snapshot_is_stale(tmp_pa
 Run: `uv run pytest tests/test_service_cli.py::test_accumulate_syncs_the_portfolio_when_the_stored_snapshot_is_stale -v`
 Expected: FAIL — `assert None is not None`, vì snapshot cũ 3 ngày bị `_create_ticket` từ chối và không có gì thay thế.
 
-- [ ] **Step 3: Viết `_fresh_portfolio`**
+- [ ] **Step 3: Viết `_fresh_portfolio` có kiểm tra độ mới cho cả cached và sync**
 
 Chèn vào `src/crypto_desk/service.py` ngay trước `def _position_quantity`:
 
 ```python
+    @staticmethod
+    def _is_snapshot_fresh(
+        snapshot: PortfolioSnapshot | None,
+        target_env: str,
+        now: datetime,
+    ) -> bool:
+        if snapshot is None or snapshot.environment != target_env:
+            return False
+        try:
+            as_of = datetime.fromisoformat(snapshot.as_of).astimezone(UTC)
+        except (ValueError, TypeError):
+            return False
+        return as_of <= now and (now - as_of) <= timedelta(minutes=5)
+
     def _fresh_portfolio(self, now: datetime) -> PortfolioSnapshot | None:
         """Snapshot còn hạn 5 phút, tự sync khi cũ.
 
@@ -119,21 +144,24 @@ Chèn vào `src/crypto_desk/service.py` ngay trước `def _position_quantity`:
 
         Lỗi broker ở đây trả ``None`` chứ không lan ra ngoài: ticket là hệ quả
         của nghiên cứu, không phải điều kiện của nó.
+
+        Snapshot vừa sync cũng phải được kiểm tra độ mới y hệt snapshot từ store:
+        Binance broker lấy ``as_of`` từ ``account.updateTime``, có thể là thời
+        điểm nhiều giờ trước nếu tài khoản không có giao dịch mới, hoặc lệch về tương lai.
         """
-        snapshot = self.store.latest_snapshot(self.settings.binance.environment)
-        if snapshot is not None and snapshot.environment == self.settings.binance.environment:
-            as_of = datetime.fromisoformat(snapshot.as_of).astimezone(UTC)
-            if as_of <= now and now - as_of <= timedelta(minutes=5):
-                return snapshot
+        target_env = self.settings.binance.environment
+        snapshot = self.store.latest_snapshot(target_env)
+        if self._is_snapshot_fresh(snapshot, target_env, now):
+            return snapshot
         if self.broker is None:
             return None
         try:
             refreshed = self.sync()
         except Exception:
             return None
-        if refreshed.environment != self.settings.binance.environment:
-            return None
-        return refreshed
+        if self._is_snapshot_fresh(refreshed, target_env, now):
+            return refreshed
+        return None
 ```
 
 - [ ] **Step 4: Nối `_fresh_portfolio` vào `_create_ticket`**
@@ -220,18 +248,46 @@ bằng:
             self._write_json(report_dir / "ticket_blocked.json", {"reason": blocked_by})
 ```
 
-- [ ] **Step 7: Cấp broker cho `analyze` và `daily` trong CLI**
+- [ ] **Step 7: Cấp broker an toàn cho `analyze` và `daily` trong CLI và Dispatcher**
 
-`src/crypto_desk/cli.py:123`:
+1. Trong `src/crypto_desk/cli.py:570`, bọc khởi tạo broker bằng graceful fallback: nếu thiếu credentials hoặc lỗi môi trường khi `broker=True`, giữ `selected_broker = None` để `analyze` và `daily` vẫn tiếp tục chạy nghiên cứu trọn vẹn (chỉ fail-fast khi `execution=True`):
+
+```python
+    selected_broker = None
+    if broker:
+        try:
+            selected_broker = _broker(settings)
+        except (ValueError, BrokerError):
+            if execution:
+                raise
+            selected_broker = None
+```
+
+2. Trong `src/crypto_desk/cli.py:123` và `136`:
 
 ```python
     service = _service(settings, broker=True)
 ```
 
-`src/crypto_desk/cli.py:136`:
-
 ```python
     result = _service(settings, broker=True).daily(due=due, catch_up=catch_up)
+```
+
+3. Trong `src/crypto_desk/dispatcher.py:203` và `253`:
+
+```python
+        elif args.symbol in self.settings.symbols:
+            run = self._service(broker=True).analyze(args.symbol)
+```
+
+```python
+    def _dispatch_daily(
+        self,
+        args: Any,
+        operator_email: str,
+    ) -> SafeDailyResult:
+        del args, operator_email
+        result = self._service(broker=True).daily(due=False, catch_up=False)
 ```
 
 - [ ] **Step 8: Chạy test, xác nhận nó đạt**
@@ -339,16 +395,111 @@ def test_snapshot_from_another_environment_never_mints_a_ticket(tmp_path):
 Run: `uv run pytest tests/test_service_cli.py::test_snapshot_from_another_environment_never_mints_a_ticket -v`
 Expected: PASS
 
+- [ ] **Step 14b: Viết test snapshot vừa sync nhưng as_of cũ hoặc ở tương lai bị từ chối**
+
+Thêm vào `tests/test_service_cli.py`:
+
+```python
+def test_sync_snapshot_with_stale_update_time_is_rejected_as_unfresh(tmp_path):
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+
+    class StaleUpdateTimeBroker(FakeBroker):
+        def account_snapshot(self):
+            snapshot = super().account_snapshot()
+            # updateTime từ Binance là 20 phút trước
+            return replace(snapshot, as_of=(NOW - timedelta(minutes=20)).isoformat())
+
+    service = CryptoDeskService(
+        settings,
+        store,
+        broker=StaleUpdateTimeBroker(),
+        evidence_builder=FakeBuilder(),
+        committee=FakeCommittee(),
+        now=lambda: NOW,
+    )
+
+    result = service.analyze("BTCUSDT")
+
+    assert result.ticket_id is None
+    blocked = json.loads((result.report_dir / "ticket_blocked.json").read_text(encoding="utf-8"))
+    assert blocked["reason"] == "no_portfolio_snapshot_within_5min"
+```
+
+- [ ] **Step 14c: Viết test analyze vẫn chạy thành công khi thiếu credentials Binance**
+
+Thêm vào `tests/test_service_cli.py`:
+
+```python
+def test_service_analyze_succeeds_without_binance_credentials(tmp_path, monkeypatch):
+    monkeypatch.delenv("BINANCE_TESTNET_API_KEY", raising=False)
+    monkeypatch.delenv("BINANCE_TESTNET_API_SECRET", raising=False)
+    settings = make_settings(tmp_path)
+    # Khởi tạo qua _service với broker=True nhưng không có key môi trường
+    service = _service(settings, broker=True, committee=False)
+    assert service.broker is None
+
+    result = service.analyze("BTCUSDT")
+    assert result.run_id is not None
+    assert (result.report_dir / "analysis_run.json").exists()
+```
+
+- [ ] **Step 14d: Viết test dispatcher cấp broker=True cho analyze và daily**
+
+Thêm vào `tests/test_dispatcher.py`:
+
+```python
+def test_dispatcher_analyze_and_daily_requests_broker(tmp_path):
+    settings = make_settings(tmp_path)
+    captured_kwargs: list[dict[str, Any]] = []
+
+    def fake_factory(**kwargs):
+        captured_kwargs.append(kwargs)
+        fake_service = Mock()
+        fake_service.analyze.return_value = Mock(
+            run_id="run-1",
+            cutoff=NOW,
+            current_price=Decimal("100000"),
+            ticket_id=None,
+            decision=Mock(
+                symbol="BTCUSDT",
+                action="NO_TRADE",
+                conviction=Decimal("0.5"),
+                reason="test",
+                entry=None,
+                stop=None,
+                target=None,
+            ),
+        )
+        fake_service.daily.return_value = {
+            "status": "COMPLETED",
+            "bucket": "2026-09-23",
+            "run_ids": [],
+            "screen": [],
+        }
+        return fake_service
+
+    dispatcher = CommandDispatcher(
+        settings,
+        service_factory=fake_factory,
+        now=lambda: NOW,
+    )
+    dispatcher.dispatch_raw("analyze", {"symbol": "BTCUSDT"}, operator_email="op@example.com")
+    dispatcher.dispatch_raw("daily", {}, operator_email="op@example.com")
+
+    assert all(kwargs.get("broker") is True for kwargs in captured_kwargs)
+```
+
 - [ ] **Step 15: Chạy toàn bộ suite và lint**
 
 Run: `uv run pytest && uv run ruff check src tests`
-Expected: **336 passed**, ruff sạch.
+Expected: **341 passed**, ruff sạch (336 baseline + 5 test mới của Task 1).
 
 - [ ] **Step 16: Commit**
 
 ```bash
-git add src/crypto_desk/service.py src/crypto_desk/cli.py tests/test_service_cli.py
-git commit -m "fix: tự sync danh mục và nói ra lý do khi ticket không được tạo
+git add src/crypto_desk/service.py src/crypto_desk/cli.py src/crypto_desk/dispatcher.py tests/test_service_cli.py tests/test_dispatcher.py
+git commit -m "fix: tự sync danh mục an toàn, xử lý fallback broker và cấp broker từ dispatcher
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
@@ -491,7 +642,7 @@ Expected: 2 passed
 - [ ] **Step 9: Chạy toàn bộ suite và lint**
 
 Run: `uv run pytest && uv run ruff check src tests`
-Expected: **339 passed**, ruff sạch.
+Expected: **343 passed**, ruff sạch.
 
 - [ ] **Step 10: Commit**
 
@@ -572,7 +723,6 @@ Thay `src/crypto_desk/service.py:212-251` bằng:
             target_date -= timedelta(days=1)
             if due and not catch_up:
                 return {"status": "NOT_DUE", "bucket": str(target_date)}
-        backfill = False
         if catch_up:
             for days_ago in range(31):
                 candidate = target_date - timedelta(days=days_ago)
@@ -581,16 +731,17 @@ Thay `src/crypto_desk/service.py:212-251` bằng:
                     candidate.isoformat(),
                 ):
                     target_date = candidate
-                    backfill = days_ago > 0
                     break
         bucket = target_date.isoformat()
         if self.store.scheduled_done("daily", bucket):
             return {"status": "ALREADY_DONE", "bucket": bucket}
 
-        if backfill:
+        is_backfill = target_date < now.date()
+        if is_backfill:
             # Sổ lệnh, funding và RSS 48 giờ của một ngày đã bị bỏ qua không dựng
             # lại được. Chỉ reflection là dựng lại được thật, vì nó đọc klines
-            # lịch sử theo khoảng thời gian.
+            # lịch sử theo khoảng thời gian. Mọi bucket ngày quá khứ (< now.date()),
+            # kể cả khi chạy catch_up trước 00:15 UTC, đều đi nhánh này.
             reflection_run_ids = self.refresh_reflections(
                 datetime.combine(target_date, time(0, 15), tzinfo=UTC)
             )
@@ -669,15 +820,39 @@ def test_reflections_only_bucket_is_marked_done_and_never_repeats(tmp_path):
     assert second["bucket"] == "2026-07-15"
 ```
 
-- [ ] **Step 7: Chạy hai test catch-up**
+- [ ] **Step 6b: Viết test catch-up trước 00:15 UTC chạy REFLECTIONS_ONLY cho ngày hôm qua**
+
+Thêm vào `tests/test_service_cli.py`:
+
+```python
+def test_daily_catch_up_before_0015_utc_replays_reflections_for_yesterday(tmp_path):
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    # 00:10 UTC ngày 2026-07-17, hôm nay chưa đến giờ (00:15)
+    clock_now = datetime(2026, 7, 17, 0, 10, tzinfo=UTC)
+    service = CryptoDeskService(
+        settings,
+        store,
+        evidence_builder=FakeBuilder(),
+        committee=FakeCommittee(),
+        now=lambda: clock_now,
+    )
+    result = service.daily(catch_up=True)
+    # Bucket hôm qua 2026-07-16 phải là REFLECTIONS_ONLY, không được phân tích live
+    assert result["status"] == "REFLECTIONS_ONLY"
+    assert result["bucket"] == "2026-07-16"
+    assert result["run_ids"] == []
+```
+
+- [ ] **Step 7: Chạy các test catch-up**
 
 Run: `uv run pytest tests/test_service_cli.py -k "catch_up or reflections_only_bucket" -v`
-Expected: 2 passed
+Expected: 3 passed
 
 - [ ] **Step 8: Chạy toàn bộ suite và lint**
 
 Run: `uv run pytest && uv run ruff check src tests`
-Expected: **341 passed**, ruff sạch.
+Expected: **345 passed**, ruff sạch (343 từ Task 2 + 2 test mới của Task 3).
 
 - [ ] **Step 9: Commit**
 
@@ -690,17 +865,19 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 4: Một ngưỡng lệch entry duy nhất
+### Task 4: Một ngưỡng lệch entry duy nhất và thống nhất mẫu số đo lệch giá
 
 **Files:**
 - Modify: `src/crypto_desk/committee.py:556-594` (`CryptoCommittee.__init__`)
 - Modify: `src/crypto_desk/committee.py:824-843` (`_validate_manager`)
 - Modify: `src/crypto_desk/cli.py:572-578` (`_service`) và `src/crypto_desk/cli.py:604-617` (`_vn_service`)
-- Test: `tests/test_committee.py`
+- Modify: `src/crypto_desk/execution.py:316` (thống nhất mẫu số theo `quote.mid`)
+- Test: `tests/test_committee.py`, `tests/test_execution.py`
 
 **Interfaces:**
 - Consumes: `RiskSettings.max_quote_deviation: Decimal` (mặc định `Decimal("0.005")`, đã được `_validate` ràng buộc trong khoảng `(0, 1]` tại [config.py:155](../../../src/crypto_desk/config.py)).
 - Produces: `CryptoCommittee.__init__` nhận thêm keyword `max_entry_deviation: Decimal = MAX_ENTRY_DEVIATION`, lưu ở `self.max_entry_deviation`. `MAX_ENTRY_DEVIATION` vẫn là mặc định cho mọi caller không truyền gì, nên các test hiện có không đổi hành vi.
+- Unifies: Cả hai tầng đều chia cho giá thị trường (`snapshot_mid` ở committee và `quote.mid` ở execution).
 
 - [ ] **Step 1: Viết test cho ngưỡng lấy từ cấu hình**
 
@@ -769,7 +946,21 @@ bằng:
             )
 ```
 
-- [ ] **Step 5: Chạy test**
+- [ ] **Step 4b: Thống nhất mẫu số trong `execution.py` theo `quote.mid`**
+
+Thay dòng 316 của `src/crypto_desk/execution.py`:
+
+```python
+        deviation = abs(quote.mid - ticket.limit_price) / ticket.limit_price
+```
+
+bằng:
+
+```python
+        deviation = abs(quote.mid - ticket.limit_price) / quote.mid
+```
+
+- [ ] **Step 5: Chạy test committee threshold**
 
 Run: `uv run pytest tests/test_committee.py::test_entry_deviation_threshold_comes_from_the_configured_risk_limit -v`
 Expected: PASS
@@ -784,47 +975,110 @@ Trong `src/crypto_desk/cli.py`, thêm một dòng vào lời gọi `CryptoCommit
 
 Thêm dòng y hệt vào lời gọi `CryptoCommittee(...)` trong `_vn_service`, ngay sau `debate_rounds=settings.models.debate_rounds,`.
 
-- [ ] **Step 7: Viết test Review Focus 4 — lệch đúng bằng ngưỡng thì chấp nhận**
+- [ ] **Step 7: Viết test Review Focus 4 & 8 — lệch đúng bằng ngưỡng (cả biên trên và biên dưới)**
+
+Trong `tests/test_committee.py`:
 
 ```python
 def test_entry_exactly_at_the_deviation_threshold_is_accepted():
     fake_llm = FakeLLM()
     original_generate = fake_llm.generate
 
-    def exactly_at_threshold(**kwargs):
+    # Test biên trên (+0,50% so với mid 100000)
+    def exactly_at_upper_threshold(**kwargs):
         response = original_generate(**kwargs)
         if kwargs["stage"] == "manager" and "action" in response:
-            response["entry"] = "100500"   # đúng +0,50% so với mid 100000
+            response["entry"] = "100500"
             response["stop"] = "95000"
             response["target"] = "110000"
         return response
 
-    fake_llm.generate = exactly_at_threshold
+    fake_llm.generate = exactly_at_upper_threshold
+    result_upper = CryptoCommittee(fake_llm, max_entry_deviation=Decimal("0.005")).run(valid_snapshot())
+    assert result_upper.decision.action == "ACCUMULATE"
+    assert result_upper.decision.entry == Decimal("100500")
 
-    result = CryptoCommittee(
-        fake_llm,
-        max_entry_deviation=Decimal("0.005"),
-    ).run(valid_snapshot())
+    # Test biên dưới (-0,50% so với mid 100000)
+    def exactly_at_lower_threshold(**kwargs):
+        response = original_generate(**kwargs)
+        if kwargs["stage"] == "manager" and "action" in response:
+            response["entry"] = "99500"
+            response["stop"] = "95000"
+            response["target"] = "110000"
+        return response
 
-    assert result.decision.action == "ACCUMULATE"
-    assert result.decision.entry == Decimal("100500")
+    fake_llm.generate = exactly_at_lower_threshold
+    result_lower = CryptoCommittee(fake_llm, max_entry_deviation=Decimal("0.005")).run(valid_snapshot())
+    assert result_lower.decision.action == "ACCUMULATE"
+    assert result_lower.decision.entry == Decimal("99500")
 ```
 
-- [ ] **Step 8: Chạy test**
+- [ ] **Step 7b: Cập nhật và bổ sung test độ lệch giá biên dưới trong `test_execution.py`**
 
-Run: `uv run pytest tests/test_committee.py::test_entry_exactly_at_the_deviation_threshold_is_accepted -v`
-Expected: PASS
+1. Cập nhật `tests/test_execution.py:393` của `test_price_move_over_half_percent_blocks_submission`:
+
+```python
+def test_price_move_over_half_percent_blocks_submission(tmp_path):
+    broker = FakeBroker("testnet")
+    # Với limit_price = 100000 và mẫu số là quote.mid:
+    # (100503 - 100000) / 100503 = 0.5003% > 0.5%
+    broker.mid = Decimal("100503")
+```
+
+2. Thêm hai test mới vào `tests/test_execution.py`:
+
+```python
+def test_entry_at_lower_deviation_boundary_is_accepted_by_execution(tmp_path):
+    broker = FakeBroker("testnet")
+    broker.mid = Decimal("100000")
+    service, _, broker = make_service(
+        tmp_path,
+        environment="testnet",
+        testnet_enabled=True,
+        broker=broker,
+    )
+    # Ticket limit 99500 (thấp hơn mid 100000 đúng 0,5% do committee duyệt)
+    # abs(100000 - 99500) / 100000 = 0.0050 <= 0.005 -> PHẢI ĐƯỢC CHẤP NHẬN
+    ticket = make_ticket(limit_price=Decimal("99500.00"))
+    service.store.save_ticket(ticket)
+
+    service.approve("ticket-1", actor="owner", channel="telegram")
+    assert broker.place_calls == 1
+
+
+def test_price_move_below_lower_half_percent_blocks_submission(tmp_path):
+    broker = FakeBroker("testnet")
+    # Giá thị trường rơi quá 0.5% so với ticket limit 100000:
+    # abs(99497 - 100000) / 99497 = 503 / 99497 = 0.5055% > 0.5%
+    broker.mid = Decimal("99497")
+    service, _, broker = make_service(
+        tmp_path,
+        environment="testnet",
+        testnet_enabled=True,
+        broker=broker,
+    )
+
+    with pytest.raises(ValueError, match="price deviation"):
+        service.approve("ticket-1", actor="owner", channel="telegram")
+
+    assert broker.place_calls == 0
+```
+
+- [ ] **Step 8: Chạy test committee và execution**
+
+Run: `uv run pytest tests/test_committee.py -k "deviation" tests/test_execution.py -k "deviation" -v`
+Expected: ALL PASS
 
 - [ ] **Step 9: Chạy toàn bộ suite và lint**
 
 Run: `uv run pytest && uv run ruff check src tests`
-Expected: **343 passed**, ruff sạch.
+Expected: **349 passed**, ruff sạch (345 từ Task 3 + 4 test mới/biên của Task 4).
 
 - [ ] **Step 10: Commit**
 
 ```bash
-git add src/crypto_desk/committee.py src/crypto_desk/cli.py tests/test_committee.py
-git commit -m "fix: committee và execution dùng chung một ngưỡng lệch giá
+git add src/crypto_desk/committee.py src/crypto_desk/cli.py src/crypto_desk/execution.py tests/test_committee.py tests/test_execution.py
+git commit -m "fix: committee và execution thống nhất dùng chung mẫu số và kiểm soát biên dưới
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
@@ -1046,7 +1300,7 @@ Thay prompt `news` trong `VN_ROLE_PROMPTS` (`src/crypto_desk/vn_prompts.py`) b�
 - [ ] **Step 11: Chạy toàn bộ suite và lint**
 
 Run: `uv run pytest && uv run ruff check src tests`
-Expected: **345 passed**, ruff sạch.
+Expected: **352 passed**, ruff sạch.
 
 Không test hiện có nào phải sửa trong task này, và đó là điều cần kiểm chứng chứ không phải giả định. Hai chỗ đáng ngờ đã được soi trước: `test_committee_prompts_require_vietnamese_and_isolate_specialists` khẳng định `set(evidence["payload"]) == {"symbol", "items"}` cho vai `news`, nhưng `_specialist_payload` chiếu field bằng `if name in serialized["payload"]`, còn `valid_snapshot()` trong test không có khoá `symbol_news_count` — nên tập được chiếu vẫn đúng bằng hai khoá cũ. Và không test nào khẳng định câu chữ của prompt `news`. Nếu một test vẫn hỏng, sửa khẳng định của nó cho khớp hành vi mới — đừng khôi phục prompt hay field cũ.
 
@@ -1066,7 +1320,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - [ ] **Chạy lại toàn bộ suite và lint từ đầu**
 
 Run: `uv run pytest && uv run ruff check src tests`
-Expected: **345 passed**, ruff sạch. (332 baseline + 13 test mới: Task 1 thêm 4, Task 2 thêm 3, Task 3 thêm 2, Task 4 thêm 2, Task 5 thêm 2. Test bị sửa trong Task 3 được đổi tên và đổi khẳng định nên vẫn nằm trong 332.)
+Expected: **352 passed**, ruff sạch. (336 baseline tại `79a5aa4` + 16 test mới/bổ sung biên: Task 1 thêm 5, Task 2 thêm 2, Task 3 thêm 2, Task 4 thêm 4, Task 5 thêm 3. Test bị sửa trong Task 3 được đổi tên và đổi khẳng định nên vẫn nằm trong 336.)
 
 - [ ] **Kiểm tra bằng tay rằng đường ticket đã thông**
 

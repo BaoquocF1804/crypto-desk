@@ -139,6 +139,7 @@ class FakeLLM:
         return {
             "action": "ACCUMULATE",
             "conviction": "7",
+            "decision_reason": "Spot trend supports an entry with gross R:R 2.0.",
             "bull_case": "Xu hướng và thanh khoản đồng thuận.",
             "bear_case": "Funding có thể đảo chiều.",
             "catalysts": ["Dòng tiền Spot duy trì."],
@@ -173,7 +174,9 @@ def test_committee_runs_specialists_before_exactly_two_debate_rounds():
     assert fake_llm.models == ["gemini-3.6-flash"] * 9
     assert result.decision.evidence_ids == snapshot.evidence_ids
     assert result.decision.action == "ACCUMULATE"
-    assert result.decision.reason == "Quyết định của hội đồng."
+    assert (
+        "Computed gross R:R: (110000 - 100000) / (100000 - 95000) = 2.00" in result.decision.reason
+    )
 
 
 def test_committee_prompts_require_english_and_isolate_specialists():
@@ -185,6 +188,7 @@ def test_committee_prompts_require_english_and_isolate_specialists():
     assert all(
         "in English" in request["system_prompt"]
         and "untrusted data" in request["system_prompt"]
+        and "Evidence Snapshot as the only source" in request["system_prompt"]
         for request in requests.values()
     )
 
@@ -220,6 +224,16 @@ def test_committee_prompts_require_english_and_isolate_specialists():
     assert requests["bear_round_2"]["payload"]["round_number"] == 2
     assert requests["manager"]["payload"]["stage"] == "manager"
     assert requests["manager"]["payload"]["position_quantity"] == "0"
+    for stage in ("bull_round_1", "bear_round_1"):
+        prompt = requests[stage]["system_prompt"]
+        assert "asymmetry" in prompt
+        assert "invalidat" in prompt
+    manager_prompt = requests["manager"]["system_prompt"]
+    assert "(target - entry) / (entry - stop)" in manager_prompt
+    assert "R:R >= 1.5" in manager_prompt
+    assert "decision_reason" in manager_prompt
+    assert "otherwise use an empty list" in manager_prompt
+    assert "null" in requests["derivatives"]["system_prompt"]
 
 
 def test_invalid_manager_schema_retries_once_then_no_trade():
@@ -286,6 +300,69 @@ def test_invalid_accumulate_price_order_retries_then_no_trade():
     assert fake_llm.count("manager") == 2
     assert result.decision.action == "NO_TRADE"
     assert "stop < entry < target" in result.decision.reason
+
+
+def test_crypto_accumulate_requires_minimum_gross_reward_risk():
+    for target, action in (("107500", "ACCUMULATE"), ("107000", "NO_TRADE")):
+        fake_llm = FakeLLM()
+        original_generate = fake_llm.generate
+
+        def with_target(**kwargs):
+            response = original_generate(**kwargs)
+            if kwargs["stage"] == "manager":
+                response["target"] = target
+                response["decision_reason"] = "Proposed Spot USDT setup is subject to R:R gate."
+            return response
+
+        fake_llm.generate = with_target
+        result = CryptoCommittee(fake_llm).run(valid_snapshot())
+
+        assert result.decision.action == action
+        if action == "NO_TRADE":
+            assert "gross R:R" in result.decision.reason
+            assert fake_llm.count("manager") == 2
+        else:
+            assert "= 1.50" in result.decision.reason
+
+
+def test_crypto_hold_preserves_quantified_manager_reason():
+    fake_llm = FakeLLM()
+    original_generate = fake_llm.generate
+
+    def hold(**kwargs):
+        response = original_generate(**kwargs)
+        if kwargs["stage"] == "manager":
+            response.update(
+                action="HOLD",
+                entry=None,
+                stop=None,
+                target=None,
+                decision_reason="Only 0 of 2 defensible risk levels are available for a new entry.",
+            )
+        return response
+
+    fake_llm.generate = hold
+    result = CryptoCommittee(fake_llm).run(valid_snapshot())
+
+    assert result.decision.action == "HOLD"
+    assert result.decision.reason.startswith("Only 0 of 2")
+
+
+def test_crypto_manager_requires_decision_reason():
+    fake_llm = FakeLLM()
+    original_generate = fake_llm.generate
+
+    def without_reason(**kwargs):
+        response = original_generate(**kwargs)
+        if kwargs["stage"] == "manager":
+            response.pop("decision_reason")
+        return response
+
+    fake_llm.generate = without_reason
+    result = CryptoCommittee(fake_llm).run(valid_snapshot())
+
+    assert result.decision.action == "NO_TRADE"
+    assert fake_llm.count("manager") == 2
 
 
 def test_hallucinated_entry_far_from_mid_is_rejected():
@@ -565,7 +642,10 @@ def test_deepseek_adapter_generates_and_parses_json_schema():
     assert captured["response_format"] == {"type": "json_object"}
     assert captured["reasoning_effort"] == "low"
     assert captured["extra_body"] == {"thinking": {"type": "enabled"}}
-    assert "You must return a valid JSON object strictly matching this JSON schema:" in captured["messages"][0]["content"]
+    assert (
+        "You must return a valid JSON object strictly matching this JSON schema:"
+        in captured["messages"][0]["content"]
+    )
 
 
 def test_deepseek_adapter_strips_markdown_codeblock():
@@ -735,7 +815,6 @@ def test_deepseek_adapter_fallbacks_when_thinking_unsupported():
     assert "extra_body" not in calls[1]
 
 
-
 def test_provider_failure_does_not_retry_or_switch_provider():
     class FailingLLM:
         def __init__(self):
@@ -801,6 +880,16 @@ def test_futures_setup_validation():
             target=Decimal("90"),
             risk_reward_ratio=Decimal("2.0"),
             rationale="Invalid",
+        )
+
+    with pytest.raises(ValueError, match="risk_reward_ratio does not match"):
+        FuturesSetupModel(
+            direction="LONG",
+            entry=Decimal("100"),
+            stop=Decimal("95"),
+            target=Decimal("110"),
+            risk_reward_ratio=Decimal("1.5"),
+            rationale="Incorrect arithmetic",
         )
 
 
@@ -921,9 +1010,9 @@ def test_required_kinds_are_derived_from_the_evidence_map_excluding_optional():
 
     committee = CryptoCommittee(object())
 
-    assert committee.required_kinds == {
-        kind for kind, _ in SPECIALIST_EVIDENCE.values()
-    } | {"reference"}
+    assert committee.required_kinds == {kind for kind, _ in SPECIALIST_EVIDENCE.values()} | {
+        "reference"
+    }
     assert committee.required_kinds == {"spot", "news", "derivatives", "reference"}
 
     vn_committee = CryptoCommittee(
@@ -1030,6 +1119,3 @@ def test_rate_limited_specialist_is_retried_and_later_reports_survive():
     liquidity_calls = [call for call in result.calls if call.stage == "liquidity"]
     assert [call.status for call in liquidity_calls] == ["failure", "success"]
     assert result.skipped_specialists == ()
-
-
-
