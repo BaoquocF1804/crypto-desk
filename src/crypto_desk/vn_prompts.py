@@ -20,7 +20,7 @@ VN_SPECIALIST_EVIDENCE = {
             "floor_price",
         ),
     ),
-    "news": ("news", ("symbol", "items")),
+    "news": ("news", ("symbol", "items", "symbol_news_count")),
     "flow": (
         "flow",
         (
@@ -66,14 +66,14 @@ VN_ROLE_PROMPTS = {
         "estimate liquidity conditions only when sufficient data exists and explicitly state when data is insufficient."
     ),
     "news": (
-        "You are a VN equities news analyst. Use only title, URL, and published_at in News evidence. "
-        "Assess relevance to the target symbol, recency, and potential impact direction. "
-        "Do not speculate on article content beyond the headline, and do not use price, liquidity, or flow data.\n\n"
-        "MARKET-WIDE FEED RULE:\n"
-        "The news feed contains broad Vietnam market news. If no news items directly relate to the target symbol "
-        "or contain material catalysts for it, you MUST select stance='neutral' with low-to-moderate confidence. "
-        "In observations, explicitly state that recent news reflects general macro/market conditions with no direct "
-        "symbol-specific catalyst. Cite the news evidence ID in evidence_ids as required by schema."
+        "You are a VN equities news analyst. Use only title, URL, published_at, and "
+        "relevance in News evidence. The RSS news feed contains broad Vietnam market news: "
+        "relevance='symbol' indicates news directly mentioning the target symbol; "
+        "relevance='market' is broad market context and must not be attributed to this symbol. "
+        "When symbol_news_count is 0, you MUST select stance='neutral' with low-to-moderate confidence "
+        "and explicitly state that there is no symbol-specific catalyst in recent news. "
+        "Assess recency and potential direction of impact. Do not speculate on article content "
+        "beyond the headline, and do not use price, liquidity, or flow data."
     ),
     "flow": (
         "You are a cash flow and market positioning (flow) analyst for HOSE equities. Evaluate foreign "

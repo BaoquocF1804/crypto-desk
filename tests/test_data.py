@@ -15,6 +15,7 @@ from crypto_desk.data import (
     Fetched,
     PublicDataClient,
     _parse_feed,
+    tag_news_relevance,
 )
 
 
@@ -559,3 +560,59 @@ def test_evidence_builder_collects_extended_futures_metrics():
     assert derivatives_item.payload["funding_rate_trend"] == "rising"
     assert Decimal(str(derivatives_item.payload["oi_change_1h_pct"])) == Decimal("5")
     assert Decimal(str(derivatives_item.payload["long_short_ratio"])) == Decimal("1.85")
+
+
+def test_news_relevance_marks_symbol_matches_and_keeps_market_items():
+    items = [
+        {"title": "Institutional crypto flows rise"},
+        {"title": "Bitcoin ETF inflows hit a record"},
+        {"title": "BTC's dominance keeps climbing"},
+        {"title": "He wore a dark suit to the hearing"},
+    ]
+
+    tagged = tag_news_relevance(items, ("BTC", "bitcoin"))
+
+    assert [item["relevance"] for item in tagged] == [
+        "symbol",
+        "symbol",
+        "market",
+        "market",
+    ]
+    assert [item["title"] for item in tagged][:2] == [
+        "Bitcoin ETF inflows hit a record",
+        "BTC's dominance keeps climbing",
+    ]
+    assert len(tagged) == len(items)
+
+
+def test_news_relevance_survives_items_without_a_title():
+    items = [{"url": "https://example.test/broken"}, {"title": None}, {}]
+
+    tagged = tag_news_relevance(items, ("BTC", "bitcoin"))
+
+    assert [item["relevance"] for item in tagged] == ["market", "market", "market"]
+
+
+def test_evidence_builder_attaches_tagged_news_and_count():
+    client = FakePublicClient()
+    client.news_result = fetched(
+        [
+            {
+                "title": "Bitcoin ETF inflows hit a record",
+                "url": "https://example.test/1",
+                "published_at": (CUTOFF - timedelta(hours=1)).isoformat(),
+                "content_hash": "hash-1",
+            },
+            {
+                "title": "Institutional crypto flows rise",
+                "url": "https://example.test/2",
+                "published_at": (CUTOFF - timedelta(hours=2)).isoformat(),
+                "content_hash": "hash-2",
+            },
+        ]
+    )
+    snapshot = EvidenceBuilder(client, {"BTCUSDT": "bitcoin"}).build("BTCUSDT", CUTOFF)
+    news_item = next(item for item in snapshot.items if item.kind == "news")
+    assert news_item.payload["symbol_news_count"] == 1
+    assert [item["relevance"] for item in news_item.payload["items"]] == ["symbol", "market"]
+

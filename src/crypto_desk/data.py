@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
@@ -339,6 +340,34 @@ def _parse_feed(text: str) -> list[dict[str, str]]:
     return result
 
 
+def tag_news_relevance(
+    items: list[dict[str, str]],
+    aliases: tuple[str, ...],
+) -> list[dict[str, str]]:
+    """Gắn nhãn mỗi tin là ``symbol`` hay ``market``, không bỏ tin nào.
+
+    Lọc cứng sẽ biến một ngày không có tin riêng thành ``EvidenceError`` và kéo
+    cả desk về NO_TRADE — đổi một khiếm khuyết lấy một khiếm khuyết tệ hơn. Rổ
+    tin chung vẫn là bối cảnh thị trường hợp lệ, chỉ là model cần biết đâu là
+    tin của chính mã nó đang xét.
+
+    Biên từ được viết tay thay vì ``\\b`` để ``BTC`` không trúng trong
+    ``BTCUSDT`` và ``sui`` không trúng trong ``suit``, nhưng vẫn trúng ``BTC's``.
+    """
+    patterns = [
+        re.compile(rf"(?<![A-Za-z0-9]){re.escape(alias)}(?![A-Za-z0-9])", re.IGNORECASE)
+        for alias in aliases
+        if alias
+    ]
+    tagged: list[dict[str, str]] = []
+    for item in items:
+        title = str(item.get("title") or "")
+        relevance = "symbol" if any(pattern.search(title) for pattern in patterns) else "market"
+        tagged.append({**item, "relevance": relevance})
+    tagged.sort(key=lambda item: item["relevance"] != "symbol")
+    return tagged
+
+
 class EvidenceBuilder:
     def __init__(self, client: Any, coingecko_ids: dict[str, str]):
         self.client = client
@@ -541,7 +570,17 @@ class EvidenceBuilder:
             "reference_usdt": reference_usdt,
             "deviation": deviation,
         }
-        news_payload = {"symbol": symbol, "items": recent_news}
+        tagged_news = tag_news_relevance(
+            recent_news,
+            (rules.base_asset, self.coingecko_ids[symbol]),
+        )
+        news_payload = {
+            "symbol": symbol,
+            "items": tagged_news,
+            "symbol_news_count": sum(
+                1 for item in tagged_news if item["relevance"] == "symbol"
+            ),
+        }
         items = (
             self._evidence("spot", book, spot_payload),
             self._evidence("derivatives", open_interest, derivatives_payload),

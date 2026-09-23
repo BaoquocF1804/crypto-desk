@@ -58,10 +58,13 @@ ROLE_PROMPTS = {
         "explicitly state if data is insufficient."
     ),
     "news": (
-        "You are a news analyst. Use only title, URL, published_at, and "
-        "content_hash in News evidence. Assess relevance to the symbol, recency, "
-        "and potential direction of impact. Do not speculate on article content "
-        "beyond the headline, and do not use price, liquidity, or derivatives data."
+        "You are a news analyst. Use only title, URL, published_at, content_hash, and "
+        "relevance in News evidence. relevance='symbol' indicates news directly mentioning "
+        "the target symbol; relevance='market' is broad market context, not symbol-specific news "
+        "— do not attribute it to the symbol. When symbol_news_count is 0, explicitly state that "
+        "there is no symbol-specific news. Assess recency and potential direction of impact. "
+        "Do not speculate on article content beyond the headline, and do not use price, liquidity, "
+        "or derivatives data."
     ),
     "derivatives": (
         "You are a positioning signal specialist from Binance USDⓈ-M Futures. "
@@ -111,7 +114,7 @@ SPECIALIST_EVIDENCE = {
         "spot",
         ("symbol", "mid", "spread", "quote_volume", "depth", "rules"),
     ),
-    "news": ("news", ("symbol", "items")),
+    "news": ("news", ("symbol", "items", "symbol_news_count")),
     "derivatives": (
         "derivatives",
         (

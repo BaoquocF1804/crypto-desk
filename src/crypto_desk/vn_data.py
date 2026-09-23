@@ -20,7 +20,7 @@ from typing import Any, Callable
 
 import httpx
 
-from .data import EvidenceError, Fetched, _aware, _parse_feed
+from .data import EvidenceError, Fetched, _aware, _parse_feed, tag_news_relevance
 from .domain import EvidenceItem, iso, utcnow
 
 MAX_SOURCE_DEVIATION = Decimal("0.005")
@@ -235,6 +235,20 @@ class VNEvidenceSnapshot:
         return tuple(item.id for item in self.items)
 
 
+def _vn_news_payload(symbol: str, items: list[dict[str, str]]) -> dict[str, Any]:
+    """Rổ RSS của VN là tin thị trường chung, không theo mã.
+
+    Mọi mã HOSE nhận đúng cùng một rổ CafeF/Vietstock, nên nhãn ``relevance`` là
+    thứ duy nhất cho chuyên gia news biết tin nào nói về mã nó đang xét.
+    """
+    tagged = tag_news_relevance(items, (symbol,))
+    return {
+        "symbol": symbol,
+        "items": tagged,
+        "symbol_news_count": sum(1 for item in tagged if item["relevance"] == "symbol"),
+    }
+
+
 class VNEvidenceBuilder:
     def __init__(self, client: SSIClient):
         self.client = client
@@ -342,10 +356,7 @@ class VNEvidenceBuilder:
             as_of=iso(news_fetched.as_of),
             delayed=False,
             stale=False,
-            payload={
-                "symbol": symbol,
-                "items": news_fetched.payload,
-            },
+            payload=_vn_news_payload(symbol, news_fetched.payload),
         )
 
         ref_item = EvidenceItem.create(
