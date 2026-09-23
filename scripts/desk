@@ -3,5 +3,10 @@ set -euo pipefail
 
 script_path=$(readlink -f "$0")
 root=$(cd -- "$(dirname -- "$script_path")/.." && pwd)
-cd "$root"
+if [ -f "$root/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$root/.env"
+  set +a
+fi
 exec "$root/.venv/bin/desk" --config "$root/config.yaml" "$@"

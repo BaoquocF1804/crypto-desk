@@ -77,6 +77,9 @@ def telegram_approval_proof(
     ).hexdigest()
 
 
+_UNSET_GATE: Any = object()
+
+
 class ExecutionService:
     def __init__(
         self,
@@ -88,7 +91,7 @@ class ExecutionService:
         live_enabled: bool | None = None,
         testnet_enabled: bool | None = None,
         confirmation_secret: str | None = None,
-        environment_gate: str | None = None,
+        environment_gate: Any = _UNSET_GATE,
         telegram_approval_secret: str | None = None,
     ):
         self.store = store
@@ -108,7 +111,9 @@ class ExecutionService:
             if confirmation_secret is not None
             else os.getenv("LIVE_CONFIRMATION_SECRET")
         )
-        self.environment_gate = environment_gate or os.getenv("BINANCE_ENV")
+        self.environment_gate = (
+            os.getenv("BINANCE_ENV") if environment_gate is _UNSET_GATE else environment_gate
+        )
         self._telegram_approval_secret = (
             telegram_approval_secret
             if telegram_approval_secret is not None

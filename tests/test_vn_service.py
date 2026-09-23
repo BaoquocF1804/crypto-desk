@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import dataclasses
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 import json
 
 from crypto_desk.committee import CommitteeResult
 from crypto_desk.config import VN_BENCHMARK_SYMBOL, Settings
-from crypto_desk.domain import EvidenceItem, ResearchDecision
+from crypto_desk.domain import EvidenceItem, FuturesTradeSetup, ResearchDecision
 from crypto_desk.store import Store
 from crypto_desk.vn_data import VNEvidenceSnapshot
 from crypto_desk.vn_prompts import (
@@ -100,6 +101,7 @@ def test_a_missing_fundamentals_cache_still_produces_a_run_and_says_so(tmp_path)
     settings = Settings(
         database=tmp_path / "vn.sqlite3",
         artifacts=tmp_path / "artifacts",
+        vn_artifacts=tmp_path / "artifacts",
         fundamentals_dir=tmp_path / "no-such-dir",
     )
     store = Store(settings.database)
@@ -129,6 +131,59 @@ def test_a_missing_fundamentals_cache_still_produces_a_run_and_says_so(tmp_path)
     assert run.decision.action == "HOLD"
     assert "KHÔNG đọc được báo cáo tài chính" in report
     assert report.splitlines()[0].startswith(">")
+
+
+def test_vn_decision_strips_futures_bias_and_setups_from_committee(tmp_path):
+    """Kịch bản phái sinh không được rò vào quyết định cổ phiếu VN (HOSE)."""
+    settings = Settings(
+        database=tmp_path / "vn.sqlite3",
+        vn_artifacts=tmp_path / "artifacts",
+        fundamentals_dir=tmp_path / "no-such-dir",
+    )
+    store = Store(settings.database)
+
+    leak_decision = make_vn_decision("FPT", "NO_TRADE")
+    leak_decision = dataclasses.replace(
+        leak_decision,
+        futures_bias="BEARISH",
+        futures_setups=(
+            FuturesTradeSetup(
+                direction="SHORT",
+                entry=Decimal("71700"),
+                stop=Decimal("74300"),
+                target=Decimal("66250"),
+                risk_reward_ratio=Decimal("2.1"),
+                rationale="Phe bán áp đảo.",
+            ),
+        ),
+    )
+
+    class _Builder:
+        def build(self, symbol, cutoff=None):
+            return make_vn_snapshot(symbol)
+
+    class _Committee:
+        def run(self, snapshot, **kwargs):
+            return CommitteeResult(
+                decision=leak_decision,
+                reports={},
+                calls=(),
+                skipped_specialists=(),
+            )
+
+    service = VNDeskService(
+        settings, store, evidence_builder=_Builder(), committee=_Committee()
+    )
+    try:
+        run = service.analyze("FPT")
+    finally:
+        store.close()
+
+    assert run.decision.futures_bias is None
+    assert run.decision.futures_setups == ()
+    saved_decision = json.loads((run.report_dir / "decision.json").read_text(encoding="utf-8"))
+    assert saved_decision.get("futures_bias") is None
+    assert saved_decision.get("futures_setups") == []
 
 
 def test_committee_runs_with_missing_optional_fundamentals():
@@ -183,7 +238,11 @@ def test_committee_runs_with_missing_optional_fundamentals():
 
 
 def test_vn_reflections_are_benchmarked_against_vn30_not_btc(tmp_path):
-    settings = Settings(database=tmp_path / "vn.sqlite3", artifacts=tmp_path / "a")
+    settings = Settings(
+        database=tmp_path / "vn.sqlite3",
+        artifacts=tmp_path / "a",
+        vn_artifacts=tmp_path / "a",
+    )
     store = Store(settings.database)
     seen: dict[str, str] = {}
 
@@ -212,6 +271,7 @@ def test_vn_reflection_sweep_never_picks_up_crypto_runs(tmp_path):
     settings = Settings(
         database=tmp_path / "vn.sqlite3",
         artifacts=tmp_path / "a",
+        vn_artifacts=tmp_path / "a",
         symbols=("BTCUSDT",),
         vn_symbols=("FPT",),
     )
@@ -244,4 +304,116 @@ def test_vn_reflection_sweep_never_picks_up_crypto_runs(tmp_path):
 
     assert saved == ["r-fpt"]
     assert "BTCUSDT" not in swept
+
+
+def test_vn_technical_evidence_includes_close_raw():
+    kind, fields = VN_SPECIALIST_EVIDENCE["technical"]
+    assert kind == "spot"
+    assert "close_raw" in fields
+    assert "mid" in fields
+    assert "daily_closes" in fields
+
+
+def test_vn_service_builds_and_passes_prior_thesis_to_committee(tmp_path):
+    settings = Settings(
+        database=tmp_path / "vn.sqlite3",
+        artifacts=tmp_path / "a",
+        vn_artifacts=tmp_path / "a",
+        vn_symbols=("FPT",),
+    )
+    store = Store(settings.database)
+
+    prior_cutoff = NOW - timedelta(days=5)
+    prior_dir = tmp_path / "r-prior"
+    prior_dir.mkdir()
+    (prior_dir / "evidence.json").write_text(
+        json.dumps({"mid": "95", "closeRaw": "95"}), encoding="utf-8"
+    )
+    prior_dec = make_vn_decision("FPT", "ACCUMULATE")
+    prior_dec = dataclasses.replace(
+        prior_dec,
+        entry=Decimal("95"),
+        stop=Decimal("90"),
+        target=Decimal("110"),
+    )
+    store.save_run("r-prior", prior_cutoff.isoformat(), prior_dec, prior_dir)
+
+    passed_prior_thesis: dict | None = None
+
+    class _Builder:
+        def build(self, symbol, cutoff=None):
+            return make_vn_snapshot(symbol)
+
+    class _Committee:
+        def run(self, snapshot, **kwargs):
+            nonlocal passed_prior_thesis
+            passed_prior_thesis = kwargs.get("prior_thesis")
+            return CommitteeResult(
+                decision=make_vn_decision(snapshot.symbol, "HOLD"),
+                reports={},
+                calls=(),
+                skipped_specialists=(),
+            )
+
+    service = VNDeskService(
+        settings, store, evidence_builder=_Builder(), committee=_Committee()
+    )
+    try:
+        run = service.analyze("FPT", NOW)
+    finally:
+        store.close()
+
+    assert passed_prior_thesis is not None
+    assert passed_prior_thesis["run_id"] == "r-prior"
+    assert passed_prior_thesis["action"] == "ACCUMULATE"
+    assert passed_prior_thesis["prior_price"] == "95"
+    assert passed_prior_thesis["current_price"] == "100"
+    assert run.decision.prior_run_id == "r-prior"
+
+
+def test_vn_committee_with_vn_manager_decision_model():
+    from crypto_desk.committee import AnalystReport, CryptoCommittee, VNManagerDecision
+
+    class _MockModel:
+        def generate(self, **kwargs):
+            evidence_ids = kwargs["payload"]["evidence_ids"]
+            if kwargs.get("response_model") is AnalystReport:
+                return {
+                    "stance": "bullish",
+                    "confidence": "7",
+                    "observations": ["Strong growth"],
+                    "risks": ["Competition"],
+                    "evidence_ids": evidence_ids,
+                }
+            assert kwargs.get("response_model") is VNManagerDecision
+            return {
+                "action": "ACCUMULATE",
+                "conviction": "8",
+                "bull_case": "Solid fundamentals and technical setup",
+                "bear_case": "Market volatility",
+                "catalysts": ["Earnings release"],
+                "invalidation": "Breaks below support",
+                "entry": "100",
+                "stop": "95",
+                "target": "115",
+                "evidence_ids": evidence_ids,
+                "thesis_continuity": "NEW",
+            }
+
+    committee = CryptoCommittee(
+        _MockModel(),
+        specialists=VN_SPECIALISTS,
+        role_prompts=VN_ROLE_PROMPTS,
+        specialist_evidence=VN_SPECIALIST_EVIDENCE,
+        optional_kinds=VN_OPTIONAL_KINDS,
+        mid_label="giá khớp SSI",
+        manager_model=VNManagerDecision,
+    )
+    snapshot = make_vn_snapshot("FPT")
+    result = committee.run(snapshot)
+
+    assert result.decision.action == "ACCUMULATE"
+    assert result.decision.conviction == Decimal("8")
+    assert result.decision.futures_bias is None
+    assert result.decision.futures_setups == ()
 

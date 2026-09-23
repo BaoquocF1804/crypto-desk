@@ -271,7 +271,14 @@ class VNEvidenceBuilder:
         )
         if board_row is None:
             raise EvidenceError(f"Mã {symbol} không tìm thấy trên bảng giá HOSE")
-        matched_price = Decimal(str(board_row["matchedPrice"]))
+        session_dt_str = datetime.strptime(
+            latest_session["tradingDate"], "%d/%m/%Y"
+        ).strftime("%Y%m%d")
+        board_date_str = str(board_row.get("tradingDate") or "")
+        if board_date_str > session_dt_str and board_row.get("priorClosePrice"):
+            matched_price = Decimal(str(board_row["priorClosePrice"]))
+        else:
+            matched_price = Decimal(str(board_row["matchedPrice"]))
         raw_mid = session_mid(latest_session)
         assert_sources_agree(matched_price, raw_mid)
 

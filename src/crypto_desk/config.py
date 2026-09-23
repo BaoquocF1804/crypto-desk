@@ -16,7 +16,7 @@ V1_SYMBOLS = frozenset({"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "SUIUSDT"})
 MAINNET_GRADUATION_CHAINS = 20
 HARD_MAINNET_CAP_USDT = Decimal("25")
 VN_BENCHMARK_SYMBOL = "VN30"
-VN_V1_SYMBOLS = frozenset({"FPT", "MBB"})
+VN_V1_SYMBOLS = frozenset({"FPT", "MBB", "TCB", "MWG"})
 DEFAULT_VN_NEWS_FEEDS = (
     "https://cafef.vn/thi-truong-chung-khoan.rss",
     "https://vietstock.vn/144/chung-khoan/co-phieu.rss",
@@ -44,7 +44,15 @@ GEMINI_ALLOWED_MODELS = frozenset(
         "gemini-1.5-pro",
     }
 )
-ModelProvider = Literal["gemini", "openai", "vertexai"]
+DEEPSEEK_ALLOWED_MODELS = frozenset(
+    {
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+    }
+)
+ModelProvider = Literal["gemini", "openai", "vertexai", "deepseek"]
 ThinkingLevel = Literal["low", "high"]
 
 
@@ -97,9 +105,10 @@ class Settings:
     binance: BinanceSettings = field(default_factory=BinanceSettings)
     schedule: ScheduleSettings = field(default_factory=ScheduleSettings)
     telegram_allowlist: tuple[str, ...] = ()
-    vn_symbols: tuple[str, ...] = ("FPT", "MBB")
+    vn_symbols: tuple[str, ...] = ("FPT", "MBB", "TCB", "MWG")
     vn_news_feeds: tuple[str, ...] = DEFAULT_VN_NEWS_FEEDS
     fundamentals_dir: Path = Path("data/fundamentals")
+    vn_artifacts: Path = Path("artifacts/vn")
 
 
 def _local_path(base: Path, value: str) -> Path:
@@ -137,7 +146,7 @@ def _validate(settings: Settings) -> None:
     if any(symbol not in settings.coingecko_ids for symbol in settings.symbols):
         raise ValueError("every symbol requires a CoinGecko id")
     if any(symbol not in VN_V1_SYMBOLS for symbol in settings.vn_symbols):
-        raise ValueError("VN symbol is outside the V1 allowlist (FPT, MBB)")
+        raise ValueError("VN symbol is outside the V1 allowlist (FPT, MBB, TCB, MWG)")
     for name in (
         "per_trade",
         "max_symbol",
@@ -154,8 +163,8 @@ def _validate(settings: Settings) -> None:
         raise ValueError(f"ticket_ttl_minutes must be between 1 and {MAX_TICKET_TTL_MINUTES}")
     if settings.models.debate_rounds != 2:
         raise ValueError("V1 requires exactly two debate rounds")
-    if settings.models.provider not in {"gemini", "openai", "vertexai"}:
-        raise ValueError("models.provider must be gemini, openai, or vertexai")
+    if settings.models.provider not in {"gemini", "openai", "vertexai", "deepseek"}:
+        raise ValueError("models.provider must be gemini, openai, vertexai, or deepseek")
     if settings.models.quick_thinking not in {"low", "high"}:
         raise ValueError("models.quick_thinking must be low or high")
     if settings.models.deep_thinking not in {"low", "high"}:
@@ -164,6 +173,11 @@ def _validate(settings: Settings) -> None:
     if settings.models.provider in {"gemini", "vertexai"}:
         if any(model not in GEMINI_ALLOWED_MODELS for model in selected_models):
             raise ValueError("Gemini models must be in the allowlist")
+    elif settings.models.provider == "deepseek":
+        if any(model.startswith("gemini-") for model in selected_models):
+            raise ValueError("DeepSeek provider cannot use Gemini models")
+        if any(not model.startswith("deepseek-") for model in selected_models):
+            raise ValueError("DeepSeek models must start with 'deepseek-'")
     elif any(model.startswith("gemini-") for model in selected_models):
         raise ValueError("Gemini models require models.provider=gemini or vertexai")
     if settings.binance.environment not in {"testnet", "mainnet"}:
@@ -182,6 +196,9 @@ def load_settings(path: Path) -> Settings:
     )
     fundamentals_dir = _local_path(
         base, raw.get("fundamentals_dir", "data/fundamentals")
+    )
+    vn_artifacts = _local_path(
+        base, raw.get("vn_artifacts", "artifacts/vn")
     )
     models_raw = raw.get("models", {})
     model_defaults = ModelSettings()
@@ -219,6 +236,7 @@ def load_settings(path: Path) -> Settings:
         vn_symbols=vn_symbols,
         vn_news_feeds=vn_news_feeds,
         fundamentals_dir=fundamentals_dir,
+        vn_artifacts=vn_artifacts,
     )
     _validate(settings)
     return settings

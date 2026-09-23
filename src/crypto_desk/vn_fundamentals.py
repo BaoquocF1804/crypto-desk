@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 from .domain import EvidenceItem
@@ -81,14 +82,37 @@ def load_fundamentals(
         # bất biến 9 cấm. Thà không có evidence cơ bản.
         return None
 
+    # Check staleness: compare report year to fetched_at year
+    report_year = None
+    if "Năm" in ratio:
+        try:
+            report_year = int(ratio["Năm"])
+        except (ValueError, TypeError):
+            pass
+    elif "period" in ratio:
+        m = re.search(r"(\d{4})", str(ratio["period"]))
+        if m:
+            report_year = int(m.group(1))
+
+    fetched_at_str = str(raw.get("fetched_at", ""))
+    fetched_year = None
+    m_fetched = re.search(r"(\d{4})", fetched_at_str)
+    if m_fetched:
+        fetched_year = int(m_fetched.group(1))
+
+    stale = False
+    if report_year and fetched_year:
+        if fetched_year - report_year > 1:
+            stale = True
+
     return EvidenceItem.create(
         kind="fundamentals",
         provider="vnstock",
         source=str(path),
-        fetched_at=str(raw.get("fetched_at", "")),
-        as_of=str(raw.get("fetched_at", "")),
+        fetched_at=fetched_at_str,
+        as_of=fetched_at_str,
         delayed=True,
-        stale=False,
+        stale=stale,
         payload={
             "symbol": symbol,
             "industry": industry,

@@ -467,7 +467,7 @@ def make_dashboard_snapshot(tmp_path: Path) -> Any:
 
 class _HugeSnapshotStub:
     def model_dump(self, mode: str) -> dict[str, Any]:
-        return {"padding": "x" * (70 * 1024)}
+        return {"padding": "x" * (135 * 1024)}
 
 
 @pytest.mark.parametrize("status", [200, 204])

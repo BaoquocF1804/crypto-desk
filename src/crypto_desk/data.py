@@ -393,8 +393,9 @@ class EvidenceBuilder:
             news,
         )
         future_cutoff = max(cutoff, *(item.fetched_at for item in fetched)) if live else cutoff
+        tolerance = timedelta(seconds=5) if live else timedelta(0)
         for item in fetched:
-            if _aware(item.as_of) > future_cutoff:
+            if _aware(item.as_of) > future_cutoff + tolerance:
                 raise EvidenceError(f"{item.provider} evidence is from the future")
 
         self._fresh(

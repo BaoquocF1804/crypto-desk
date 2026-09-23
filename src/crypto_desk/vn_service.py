@@ -104,12 +104,26 @@ class VNDeskService:
             reflections = tuple(
                 render_reflection(item) for item in self.store.list_reflections(symbol)[:5]
             )
+            prior_thesis, prior_run_id = self._build_prior_thesis(
+                symbol, snapshot, effective_cutoff
+            )
             try:
                 committee_result = committee.run(
                     snapshot,
                     reflections=reflections,
+                    prior_thesis=prior_thesis,
                 )
                 decision = committee_result.decision
+                if prior_run_id and decision.prior_run_id != prior_run_id:
+                    decision = dataclasses.replace(
+                        decision,
+                        prior_run_id=prior_run_id,
+                    )
+                decision = dataclasses.replace(
+                    decision,
+                    futures_bias=None,
+                    futures_setups=(),
+                )
                 reports = committee_result.reports
                 skipped_specialists = getattr(committee_result, "skipped_specialists", ())
                 llm_payload["calls"] = to_jsonable(getattr(committee_result, "calls", ()))
@@ -117,10 +131,11 @@ class VNDeskService:
                 decision = self._no_trade(
                     symbol,
                     f"committee:{type(exc).__name__}",
+                    prior_run_id=prior_run_id,
                 )
 
         run_id = str(uuid.uuid4())
-        report_dir = self.settings.artifacts / effective_cutoff.date().isoformat() / run_id
+        report_dir = self.settings.vn_artifacts / effective_cutoff.date().isoformat() / run_id
         report_dir.mkdir(parents=True, exist_ok=False)
         self._write_json(report_dir / "evidence.json", evidence_payload)
         self._write_json(
@@ -303,6 +318,7 @@ class VNDeskService:
     def _no_trade(
         symbol: str,
         reason: str,
+        prior_run_id: str | None = None,
     ) -> ResearchDecision:
         return ResearchDecision(
             symbol=symbol,
@@ -318,8 +334,90 @@ class VNDeskService:
             evidence_ids=(),
             reason=reason,
             thesis_continuity="NEW",
+            prior_run_id=prior_run_id,
             decided=False,
         )
+
+    def _build_prior_thesis(
+        self,
+        symbol: str,
+        snapshot: VNEvidenceSnapshot | None,
+        cutoff: datetime,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        prior_run = self.store.latest_valid_run(symbol, before_cutoff=iso(cutoff))
+        if not prior_run:
+            return None, None
+
+        prior_id = str(prior_run["id"])
+        prior_decision = prior_run.get("decision", {})
+        prior_cutoff_str = prior_run.get("cutoff")
+        hours_ago = Decimal("0")
+        if prior_cutoff_str:
+            try:
+                prior_dt = datetime.fromisoformat(prior_cutoff_str).astimezone(UTC)
+                diff = (cutoff - prior_dt).total_seconds() / 3600
+                hours_ago = Decimal(str(round(max(0.0, diff), 1)))
+            except Exception:
+                pass
+
+        prior_price: Decimal | None = None
+        report_dir_str = prior_run.get("report_dir")
+        if report_dir_str:
+            ev_path = Path(report_dir_str) / "evidence.json"
+            if ev_path.exists():
+                try:
+                    ev_data = json.loads(ev_path.read_text(encoding="utf-8"))
+                    if ev_data.get("mid") is not None:
+                        prior_price = Decimal(str(ev_data["mid"]))
+                    elif ev_data.get("closeRaw") is not None:
+                        prior_price = Decimal(str(ev_data["closeRaw"]))
+                except Exception:
+                    pass
+        if prior_price is None and prior_decision.get("entry") is not None:
+            try:
+                prior_price = Decimal(str(prior_decision["entry"]))
+            except Exception:
+                pass
+
+        current_mid = snapshot.mid if snapshot else None
+        price_change_pct: Decimal | None = None
+        if prior_price and current_mid and prior_price > Decimal("0"):
+            price_change_pct = (
+                (current_mid - prior_price) / prior_price * Decimal("100")
+            ).quantize(Decimal("0.01"))
+
+        prior_entry = (
+            Decimal(str(prior_decision["entry"]))
+            if prior_decision.get("entry") is not None
+            else None
+        )
+        prior_stop = (
+            Decimal(str(prior_decision["stop"])) if prior_decision.get("stop") is not None else None
+        )
+        prior_target = (
+            Decimal(str(prior_decision["target"]))
+            if prior_decision.get("target") is not None
+            else None
+        )
+
+        prior_payload: dict[str, Any] = {
+            "run_id": prior_id,
+            "cutoff": prior_cutoff_str,
+            "hours_ago": str(hours_ago),
+            "action": str(prior_decision.get("action", "NO_TRADE")),
+            "conviction": str(prior_decision.get("conviction", "0")),
+            "prior_price": str(prior_price) if prior_price is not None else None,
+            "current_price": str(current_mid) if current_mid is not None else None,
+            "price_change_pct": str(price_change_pct) if price_change_pct is not None else None,
+            "bull_case": str(prior_decision.get("bull_case", ""))[:500],
+            "bear_case": str(prior_decision.get("bear_case", ""))[:500],
+            "catalysts": [str(c)[:100] for c in prior_decision.get("catalysts", [])][:3],
+            "invalidation": str(prior_decision.get("invalidation", ""))[:300],
+            "entry": str(prior_entry) if prior_entry is not None else None,
+            "stop": str(prior_stop) if prior_stop is not None else None,
+            "target": str(prior_target) if prior_target is not None else None,
+        }
+        return prior_payload, prior_id
 
     def _markdown_report(
         self,

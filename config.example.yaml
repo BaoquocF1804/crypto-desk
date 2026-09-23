@@ -1,6 +1,7 @@
 base_currency: USDT
 database: data/crypto_desk.sqlite3
 artifacts: artifacts/crypto
+vn_artifacts: artifacts/vn
 
 symbols: [BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, SUIUSDT]
 coingecko_ids:
@@ -18,8 +19,9 @@ coingecko_ids:
 news_feeds: []
 
 models:
-  # provider hỗ trợ: gemini (AI Studio hoặc Vertex AI), vertexai, hoặc openai
+  # provider hỗ trợ: gemini (AI Studio hoặc Vertex AI), vertexai, openai, hoặc deepseek
   # Với Vertex AI: có thể dùng gemini-2.5-flash, gemini-2.0-flash, gemini-1.5-flash, v.v.
+  # Với DeepSeek: đặt provider: deepseek, quick/deep có thể dùng deepseek-chat, deepseek-reasoner, deepseek-v4-flash, deepseek-v4-pro
   provider: gemini
   quick: gemini-3.6-flash
   deep: gemini-3.6-flash
@@ -45,7 +47,7 @@ schedule:
 
 telegram_allowlist: []
 
-vn_symbols: [FPT, MBB]
+vn_symbols: [FPT, MBB, TCB, MWG]
 vn_news_feeds:
   - https://cafef.vn/thi-truong-chung-khoan.rss
   - https://vietstock.vn/144/chung-khoan/co-phieu.rss

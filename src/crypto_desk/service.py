@@ -890,48 +890,38 @@ class CryptoDeskService:
 
 
 def render_reflection(item: dict[str, Any]) -> str:
-    """Một dòng tiếng Việt cho prompt: quyết định nào, đo trong bao lâu, kết quả ra sao.
+    """One English line for prompt: which decision, evaluated over what window, what outcome.
 
-    Trước đây reflection vào prompt dưới dạng ``json.dumps(payload)`` — một túi
-    số không nhãn. Model không biết cửa sổ đo dài bao nhiêu nên đọc một con số
-    âm trên 20 ngày như bằng chứng luận điểm sai, kể cả khi luận điểm viết cho
-    horizon dài hơn. Dòng này nói thẳng cửa sổ đo.
+    Previously reflection entered the prompt as json.dumps(payload) - an unlabeled bag of numbers.
+    The model did not know the measurement window length and interpreted negative numbers over 20 days
+    as evidence of a flawed thesis, even when written for a longer horizon. This line states the window.
 
-    Dòng alpha bị bỏ khi symbol chính là benchmark: alpha của nó luôn bằng 0
-    theo cấu tạo, in ra sẽ đọc như "không tạo được lợi thế" thay vì "không áp
-    dụng".
-
-    Ngày và horizon lấy từ payload, không lấy từ hằng số hay ``created_at``:
-    ``created_at`` là lúc chấm điểm (muộn hơn quyết định đúng một horizon) nên
-    in ra sẽ nói dối model về ngày ra quyết định. Hàng cũ thiếu key thì nói rõ
-    đó là ngày ghi nhận.
-
-    Mọi mệnh đề đọc payload bằng ``.get`` và tự bỏ đi khi thiếu: hàm này chạy
-    trên đường ``analyze`` ngoài khối ``try``, một hàng payload hỏng mà ném
-    ``KeyError`` sẽ giết cả lần chạy thay vì rụng một dòng reflection.
+    The alpha clause is omitted when symbol is the benchmark itself: its alpha is always 0 by construction.
+    Date and horizon are drawn from the payload.
     """
     payload = item["payload"]
     symbol = item["symbol"]
-    action = payload.get("decision_action") or "KHÔNG RÕ"
+    action = payload.get("decision_action") or "UNKNOWN"
     cutoff = payload.get("decision_cutoff")
     horizon = payload.get("horizon_days") or REFLECTION_HORIZON_DAYS
     when = (
         str(cutoff)[:10]
         if cutoff
-        else f"ghi nhận {item['created_at'][:10]} (chưa rõ ngày quyết định)"
+        else f"recorded {item['created_at'][:10]} (decision date unknown)"
     )
-    parts = [when, symbol, f"quyết định {action}"]
+    parts = [when, symbol, f"decision {action}"]
     realized = payload.get("realized_return")
     if realized is None:
-        parts.append(f"cửa sổ {horizon} ngày")
+        parts.append(f"{horizon}-day window")
     else:
-        parts.append(f"sau {horizon} ngày: lợi nhuận {format_pct(realized)}")
+        parts.append(f"after {horizon} days: return {format_pct(realized)}")
     alpha = payload.get("alpha")
-    if symbol != BENCHMARK_SYMBOL and alpha is not None:
-        parts.append(f"alpha so với {BENCHMARK_SYMBOL} {format_pct(alpha)}")
+    benchmark_symbol = payload.get("benchmark_symbol") or BENCHMARK_SYMBOL
+    if symbol != benchmark_symbol and alpha is not None:
+        parts.append(f"alpha vs {benchmark_symbol} {format_pct(alpha)}")
     worst = payload.get("maximum_adverse_excursion")
     if worst is not None:
-        parts.append(f"điểm tệ nhất trong cửa sổ {format_pct(worst)}")
+        parts.append(f"worst adverse excursion {format_pct(worst)}")
     return " | ".join(parts)
 
 

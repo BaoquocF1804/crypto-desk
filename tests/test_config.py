@@ -92,6 +92,26 @@ models:
     assert settings.models.deep == "gemini-2.5-flash"
 
 
+def test_config_accepts_deepseek_provider(tmp_path: Path):
+    config = write_config(
+        tmp_path / "config.yaml",
+        """
+models:
+  provider: deepseek
+  quick: deepseek-chat
+  deep: deepseek-reasoner
+  quick_thinking: low
+  deep_thinking: high
+""",
+    )
+
+    settings = load_settings(config)
+
+    assert settings.models.provider == "deepseek"
+    assert settings.models.quick == "deepseek-chat"
+    assert settings.models.deep == "deepseek-reasoner"
+
+
 @pytest.mark.parametrize(
     ("body", "message"),
     [
@@ -103,6 +123,14 @@ models:
         (
             "models:\n  provider: openai\n  quick: gemini-3.6-flash\n",
             "require models.provider=gemini",
+        ),
+        (
+            "models:\n  provider: deepseek\n  quick: gemini-3.6-flash\n  deep: deepseek-reasoner\n",
+            "DeepSeek provider cannot use Gemini models",
+        ),
+        (
+            "models:\n  provider: deepseek\n  quick: gpt-4o\n  deep: deepseek-reasoner\n",
+            "DeepSeek models must start with 'deepseek-'",
         ),
         ("models:\n  quick_thinking: medium\n", "quick_thinking"),
     ],
@@ -200,20 +228,22 @@ def test_symbol_rules_require_usdt_quote():
 
 
 def test_vn_symbols_do_not_go_through_the_usdt_validation(tmp_path):
-    from crypto_desk.config import load_settings
+    from crypto_desk.config import Settings, load_settings
+
+    assert Settings().vn_symbols == ("FPT", "MBB", "TCB", "MWG")
 
     config = tmp_path / "config.yaml"
     config.write_text(
         "database: db.sqlite3\n"
         "symbols: [BTCUSDT]\n"
         "coingecko_ids: {BTCUSDT: bitcoin}\n"
-        "vn_symbols: [FPT, MBB]\n",
+        "vn_symbols: [FPT, MBB, TCB, MWG]\n",
         encoding="utf-8",
     )
 
     settings = load_settings(config)
 
-    assert settings.vn_symbols == ("FPT", "MBB")
+    assert settings.vn_symbols == ("FPT", "MBB", "TCB", "MWG")
 
 
 def test_vn_symbol_outside_the_v1_allowlist_is_rejected(tmp_path):
@@ -230,4 +260,31 @@ def test_vn_symbol_outside_the_v1_allowlist_is_rejected(tmp_path):
 
     with pytest.raises(ValueError, match="VN"):
         load_settings(config)
+
+
+def test_vn_artifacts_default_and_custom(tmp_path):
+    from crypto_desk.config import load_settings
+
+    # Default
+    config_default = tmp_path / "config_default.yaml"
+    config_default.write_text(
+        "database: db.sqlite3\n"
+        "symbols: [BTCUSDT]\n"
+        "coingecko_ids: {BTCUSDT: bitcoin}\n",
+        encoding="utf-8",
+    )
+    settings_default = load_settings(config_default)
+    assert settings_default.vn_artifacts == tmp_path / "artifacts/vn"
+
+    # Custom
+    config_custom = tmp_path / "config_custom.yaml"
+    config_custom.write_text(
+        "database: db.sqlite3\n"
+        "symbols: [BTCUSDT]\n"
+        "coingecko_ids: {BTCUSDT: bitcoin}\n"
+        "vn_artifacts: custom/vn_reports\n",
+        encoding="utf-8",
+    )
+    settings_custom = load_settings(config_custom)
+    assert settings_custom.vn_artifacts == tmp_path / "custom/vn_reports"
 

@@ -8,11 +8,17 @@ from typing import Any
 
 import crypto_desk.cli as cli
 import httpx
+import pytest
 from typer.testing import CliRunner
 
 from crypto_desk.broker import SpotQuote
 from crypto_desk.cli import _hermes_installed, _structured_client, app, doctor_report
-from crypto_desk.committee import GeminiStructuredClient, OpenAIStructuredClient
+from crypto_desk.committee import (
+    DeepSeekStructuredClient,
+    GeminiStructuredClient,
+    OpenAIStructuredClient,
+    ProviderError,
+)
 from crypto_desk.config import ModelSettings, Settings
 from crypto_desk.data import EvidenceError, EvidenceSnapshot
 from crypto_desk.domain import (
@@ -767,6 +773,7 @@ def test_json_doctor_reports_secret_presence_without_values(
     monkeypatch.setenv("BINANCE_TESTNET_API_KEY", "never-print-key")
     monkeypatch.setenv("BINANCE_TESTNET_API_SECRET", "never-print-secret")
     monkeypatch.setenv("GEMINI_API_KEY", "never-print-gemini-key")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "never-print-deepseek-key")
 
     result = CliRunner().invoke(
         app,
@@ -781,9 +788,15 @@ def test_json_doctor_reports_secret_presence_without_values(
         "key_present": True,
         "online_smoke_requested": False,
     }
+    assert payload["deepseek"] == {
+        "active": False,
+        "key_present": True,
+        "online_smoke_requested": False,
+    }
     assert "never-print-key" not in result.stdout
     assert "never-print-secret" not in result.stdout
     assert "never-print-gemini-key" not in result.stdout
+    assert "never-print-deepseek-key" not in result.stdout
 
 
 def test_provider_factory_selects_gemini_v1_or_openai(monkeypatch):
@@ -829,6 +842,32 @@ def test_provider_factory_selects_gemini_v1_or_openai(monkeypatch):
     )
 
     assert isinstance(openai, OpenAIStructuredClient)
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
+    deepseek = _structured_client(
+        Settings(
+            models=ModelSettings(
+                provider="deepseek",
+                quick="deepseek-chat",
+                deep="deepseek-reasoner",
+            )
+        )
+    )
+
+    assert isinstance(deepseek, DeepSeekStructuredClient)
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    with pytest.raises(ProviderError) as exc_info:
+        _structured_client(
+            Settings(
+                models=ModelSettings(
+                    provider="deepseek",
+                    quick="deepseek-chat",
+                    deep="deepseek-reasoner",
+                )
+            )
+        )
+    assert exc_info.value.category == "missing_key"
 
 
 def test_provider_factory_selects_vertex_ai_when_credentials_provided(tmp_path: Path, monkeypatch):
@@ -1430,10 +1469,10 @@ def test_render_reflection_states_decision_date_horizon_action_and_alpha():
     assert "2026-09-21" not in line
     assert "ETHUSDT" in line
     assert "ACCUMULATE" in line
-    assert "20 ngày" in line
+    assert "20 days" in line
     assert "+5.00%" in line
-    assert "alpha so với BTCUSDT +4.00%" in line
-    assert "điểm tệ nhất trong cửa sổ -2.00%" in line
+    assert "alpha vs BTCUSDT +4.00%" in line
+    assert "worst adverse excursion -2.00%" in line
 
 
 def test_render_reflection_uses_the_rows_own_horizon_not_the_current_constant():
@@ -1455,8 +1494,8 @@ def test_render_reflection_uses_the_rows_own_horizon_not_the_current_constant():
         }
     )
 
-    assert "sau 7 ngày" in line
-    assert "20 ngày" not in line
+    assert "after 7 days" in line
+    assert "20 days" not in line
 
 
 def test_render_reflection_marks_a_legacy_row_date_as_the_recording_date():
@@ -1476,10 +1515,10 @@ def test_render_reflection_marks_a_legacy_row_date_as_the_recording_date():
         }
     )
 
-    assert "ghi nhận 2026-08-07" in line
-    assert "chưa rõ ngày quyết định" in line
+    assert "recorded 2026-08-07" in line
+    assert "decision date unknown" in line
     # Thiếu horizon_days thì lùi về hằng số hiện hành.
-    assert "sau 20 ngày" in line
+    assert "after 20 days" in line
 
 
 def test_render_reflection_omits_clauses_whose_payload_keys_are_missing():
@@ -1496,10 +1535,10 @@ def test_render_reflection_omits_clauses_whose_payload_keys_are_missing():
 
     assert "ETHUSDT" in line
     assert "HOLD" in line
-    assert "cửa sổ 20 ngày" in line
-    assert "lợi nhuận" not in line
+    assert "20-day window" in line
+    assert "return" not in line
     assert "alpha" not in line
-    assert "tệ nhất" not in line
+    assert "worst adverse" not in line
 
 
 def test_render_reflection_omits_alpha_for_the_benchmark_itself():
@@ -1539,7 +1578,7 @@ def test_render_reflection_handles_legacy_row_without_decision_action():
         }
     )
 
-    assert "KHÔNG RÕ" in line
+    assert "UNKNOWN" in line
 
 
 def _clear_google_env(monkeypatch) -> None:
@@ -1589,6 +1628,17 @@ def test_resolve_provider_reports_openai(monkeypatch):
     target = resolve_provider(Settings(models=ModelSettings(provider="openai")))
 
     assert target.backend == "openai"
+
+    target_deepseek = resolve_provider(
+        Settings(
+            models=ModelSettings(
+                provider="deepseek",
+                quick="deepseek-chat",
+                deep="deepseek-reasoner",
+            )
+        )
+    )
+    assert target_deepseek.backend == "deepseek"
 
 
 def test_doctor_names_the_backend_that_will_actually_serve_requests(tmp_path: Path, monkeypatch):

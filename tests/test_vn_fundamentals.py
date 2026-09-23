@@ -83,3 +83,31 @@ def test_the_fetch_script_never_touches_the_desk_environment():
     assert "from crypto_desk" not in source
     assert "VNSTOCK_TELEMETRY" in source
 
+
+def test_stale_fundamentals_are_marked_stale(tmp_path):
+    from crypto_desk.vn_fundamentals import load_fundamentals
+
+    # Cache with 2018 report fetched in 2026
+    payload_stale = {
+        "fetched_at": "2026-09-20T00:00:00+00:00",
+        "ratio": {"Năm": "2018", "Quý": "4", "P/E": "15.0"},
+        "income_statement": {},
+        "balance_sheet": {},
+    }
+    (tmp_path / "OLD.json").write_text(json.dumps(payload_stale), encoding="utf-8")
+    item_stale = load_fundamentals("OLD", "Công nghệ Thông tin", tmp_path)
+    assert item_stale is not None
+    assert item_stale.stale is True
+
+    # Cache with 2026 report fetched in 2026
+    payload_fresh = {
+        "fetched_at": "2026-09-20T00:00:00+00:00",
+        "ratio": {"Năm": "2026", "Quý": "2", "P/E": "15.0"},
+        "income_statement": {},
+        "balance_sheet": {},
+    }
+    (tmp_path / "FRESH.json").write_text(json.dumps(payload_fresh), encoding="utf-8")
+    item_fresh = load_fundamentals("FRESH", "Công nghệ Thông tin", tmp_path)
+    assert item_fresh is not None
+    assert item_fresh.stale is False
+

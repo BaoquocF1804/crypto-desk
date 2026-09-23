@@ -22,10 +22,12 @@ from pydantic import BaseModel
 from .broker import BinanceSpotBroker
 from .committee import (
     CryptoCommittee,
+    DeepSeekStructuredClient,
     GeminiStructuredClient,
     OpenAIStructuredClient,
     ProviderError,
     StructuredClient,
+    VNManagerDecision,
 )
 from .config import MAINNET_GRADUATION_CHAINS, Settings, load_settings
 from .dashboard import (
@@ -420,6 +422,11 @@ def doctor_report(
             "active": settings.models.provider == "openai",
             "online_smoke_requested": online,
         },
+        "deepseek": {
+            "key_present": bool(os.getenv("DEEPSEEK_API_KEY")),
+            "active": settings.models.provider == "deepseek",
+            "online_smoke_requested": online,
+        },
         "gemini": {
             "key_present": bool(
                 os.getenv("GEMINI_API_KEY")
@@ -612,6 +619,7 @@ def _vn_service(
             specialist_evidence=VN_SPECIALIST_EVIDENCE,
             optional_kinds=VN_OPTIONAL_KINDS,
             mid_label="giá khớp SSI",
+            manager_model=VNManagerDecision,
         )
     return VNDeskService(
         settings,
@@ -633,7 +641,7 @@ class ProviderTarget:
     bên sẽ lệch nhau ngay lần sửa sau.
     """
 
-    backend: Literal["vertex", "gemini_api", "openai"]
+    backend: Literal["vertex", "gemini_api", "openai", "deepseek"]
     project: str | None = None
     location: str | None = None
 
@@ -650,12 +658,15 @@ def resolve_provider(settings: Settings) -> ProviderTarget:
                 location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1"),
             )
         return ProviderTarget(backend="gemini_api")
+    if settings.models.provider == "deepseek":
+        return ProviderTarget(backend="deepseek")
     return ProviderTarget(backend="openai")
 
 
 def _structured_client(settings: Settings) -> StructuredClient:
     target = resolve_provider(settings)
     if target.backend in {"vertex", "gemini_api"}:
+        request_timeout_seconds = float(os.getenv("GEMINI_REQUEST_TIMEOUT_SECONDS", "120.0"))
         if target.backend == "vertex":
             credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
             if credentials_path and not os.path.isabs(credentials_path):
@@ -670,6 +681,7 @@ def _structured_client(settings: Settings) -> StructuredClient:
             return GeminiStructuredClient(
                 genai.Client(**kwargs),
                 min_interval_seconds=float(os.getenv("GEMINI_MIN_REQUEST_INTERVAL_SECONDS", "6")),
+                request_timeout_seconds=request_timeout_seconds,
             )
 
         api_key = os.getenv("GEMINI_API_KEY")
@@ -689,11 +701,23 @@ def _structured_client(settings: Settings) -> StructuredClient:
                 http_options={"api_version": api_version},
             ),
             min_interval_seconds=float(os.getenv("GEMINI_MIN_REQUEST_INTERVAL_SECONDS", "6")),
+            request_timeout_seconds=request_timeout_seconds,
+        )
+    if target.backend == "deepseek":
+        api_key = os.getenv("DEEPSEEK_API_KEY")
+        if not api_key:
+            raise ProviderError("missing_key")
+        deepseek_timeout = float(os.getenv("DEEPSEEK_REQUEST_TIMEOUT_SECONDS", "120.0"))
+        base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+        return DeepSeekStructuredClient(
+            OpenAI(api_key=api_key, base_url=base_url, timeout=deepseek_timeout),
+            request_timeout_seconds=deepseek_timeout,
         )
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise ProviderError("missing_key")
-    return OpenAIStructuredClient(OpenAI(api_key=api_key))
+    openai_timeout = float(os.getenv("OPENAI_REQUEST_TIMEOUT_SECONDS", "120.0"))
+    return OpenAIStructuredClient(OpenAI(api_key=api_key, timeout=openai_timeout))
 
 
 def _execution_service(settings: Settings) -> ExecutionService:

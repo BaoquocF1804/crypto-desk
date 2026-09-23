@@ -33,6 +33,7 @@ RUNNER_ENABLED_ENV = "CRYPTO_DESK_COMMAND_RUNNER_ENABLED"
 HEARTBEAT_SECONDS = 5.0
 IDLE_POLL_SECONDS = 2.0
 LEASE_RENEW_SECONDS = 10.0
+MAX_COMMAND_LEASE_RENEW_SECONDS = 600.0
 
 
 class RunnerProtocolError(RuntimeError):
@@ -78,6 +79,7 @@ class CommandRunner:
         self._sleep = sleep
         self._log = log
         self._active_command_id: str | None = None
+        self._active_command_started_at: float = 0.0
         self._active_lock = threading.Lock()
         self._last_lease_renew = 0.0
         self._stop = threading.Event()
@@ -237,6 +239,7 @@ class CommandRunner:
         self.store.journal_start(command_id, digest, kind)
         with self._active_lock:
             self._active_command_id = command_id
+            self._active_command_started_at = time.monotonic()
         try:
             model = self.dispatcher.dispatch(
                 kind,
@@ -278,6 +281,7 @@ class CommandRunner:
         finally:
             with self._active_lock:
                 self._active_command_id = None
+                self._active_command_started_at = 0.0
 
         entry = self.store.journal_entry(command_id)
         if entry is None:
@@ -324,8 +328,20 @@ class CommandRunner:
                 self.heartbeat()
                 with self._active_lock:
                     active = self._active_command_id
-                elapsed = time.monotonic() - self._last_lease_renew
-                if active and elapsed >= LEASE_RENEW_SECONDS and self.renew_lease(active):
-                    self._last_lease_renew = time.monotonic()
+                    active_started = self._active_command_started_at
+                now = time.monotonic()
+                elapsed = now - self._last_lease_renew
+                active_duration = now - active_started if active else 0.0
+                if (
+                    active
+                    and elapsed >= LEASE_RENEW_SECONDS
+                    and active_duration < MAX_COMMAND_LEASE_RENEW_SECONDS
+                    and self.renew_lease(active)
+                ):
+                    self._last_lease_renew = now
+                elif active and active_duration >= MAX_COMMAND_LEASE_RENEW_SECONDS:
+                    self._log(
+                        f"command {active} exceeded max lease duration ({MAX_COMMAND_LEASE_RENEW_SECONDS}s)"
+                    )
             except (httpx.HTTPError, RunnerProtocolError):
                 continue

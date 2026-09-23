@@ -23,7 +23,7 @@ ACTIONABLE_TICKET_STATUSES = frozenset({"PENDING"})
 DASHBOARD_INGEST_URL_ENV = "CRYPTO_DESK_DASHBOARD_INGEST_URL"
 DASHBOARD_INGEST_TOKEN_ENV = "CRYPTO_DESK_DASHBOARD_INGEST_TOKEN"
 SITES_BYPASS_TOKEN_ENV = "CRYPTO_DESK_SITES_BYPASS_TOKEN"
-_MAX_PUBLISH_PAYLOAD_BYTES = 64 * 1024
+_MAX_PUBLISH_PAYLOAD_BYTES = 128 * 1024
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 HealthState = Literal["online", "degraded", "offline"]
@@ -738,7 +738,7 @@ def publish_dashboard(
         separators=(",", ":"),
     ).encode("utf-8")
     if len(body) > _MAX_PUBLISH_PAYLOAD_BYTES:
-        raise DashboardPublishError("dashboard payload exceeds the 64 KiB publish limit")
+        raise DashboardPublishError("dashboard payload exceeds the 128 KiB publish limit")
 
     headers = {
         "Content-Type": "application/json",

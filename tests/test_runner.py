@@ -394,3 +394,38 @@ def test_local_runner_omits_empty_sites_header(tmp_path):
     runner.heartbeat()
 
     assert "oai-sites-authorization" not in captured
+
+
+def test_runner_heartbeat_stops_renewing_lease_after_max_command_duration(tmp_path):
+    sites = FakeSites()
+    runner, store, _ = make_runner(tmp_path, sites)
+    runner.register()
+
+    # Simulate an active command started long ago (> MAX_COMMAND_LEASE_RENEW_SECONDS)
+    runner._active_command_id = "cmd-slow"
+    runner._active_command_started_at = 100.0
+    runner._last_lease_renew = 100.0
+
+    # Mock time so that monotonic is now 1000.0 (> 600s after start)
+    logs = []
+    runner._log = logs.append
+    import time
+    orig_monotonic = time.monotonic
+    try:
+        time.monotonic = lambda: 1000.0
+        # Run one iteration of heartbeat logic
+        runner.heartbeat()
+        now = time.monotonic()
+        elapsed = now - runner._last_lease_renew
+        active_duration = now - runner._active_command_started_at
+        from crypto_desk.runner import LEASE_RENEW_SECONDS, MAX_COMMAND_LEASE_RENEW_SECONDS
+
+        should_renew = (
+            runner._active_command_id
+            and elapsed >= LEASE_RENEW_SECONDS
+            and active_duration < MAX_COMMAND_LEASE_RENEW_SECONDS
+        )
+        assert not should_renew
+    finally:
+        time.monotonic = orig_monotonic
+

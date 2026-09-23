@@ -10,6 +10,7 @@ import pytest
 from crypto_desk.committee import (
     AnalystReport,
     CryptoCommittee,
+    DeepSeekStructuredClient,
     FuturesSetupModel,
     GeminiStructuredClient,
     ManagerDecision,
@@ -175,15 +176,15 @@ def test_committee_runs_specialists_before_exactly_two_debate_rounds():
     assert result.decision.reason == "Quyết định của hội đồng."
 
 
-def test_committee_prompts_require_vietnamese_and_isolate_specialists():
+def test_committee_prompts_require_english_and_isolate_specialists():
     fake_llm = FakeLLM()
 
     CryptoCommittee(fake_llm).run(valid_snapshot())
 
     requests = {request["stage"]: request for request in fake_llm.requests}
     assert all(
-        "bằng tiếng Việt có dấu" in request["system_prompt"]
-        and "dữ liệu không đáng tin cậy" in request["system_prompt"]
+        "in English" in request["system_prompt"]
+        and "untrusted data" in request["system_prompt"]
         for request in requests.values()
     )
 
@@ -527,6 +528,214 @@ def test_gemini_adapter_rejects_empty_or_invalid_output():
             )
 
 
+def test_deepseek_adapter_generates_and_parses_json_schema():
+    captured: dict[str, Any] = {}
+
+    class ChatCompletions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=(
+                                '{"stance":"neutral","confidence":"5",'
+                                '"observations":["Không có lợi thế rõ ràng."],'
+                                '"risks":[],"evidence_ids":["evidence-1"]}'
+                            )
+                        )
+                    )
+                ]
+            )
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=ChatCompletions()))
+    adapter = DeepSeekStructuredClient(client)
+
+    parsed = adapter.generate(
+        stage="technical",
+        model="deepseek-chat",
+        thinking="low",
+        response_model=AnalystReport,
+        system_prompt="Bounded role",
+        payload={"evidence_ids": ["evidence-1"]},
+    )
+
+    assert parsed.stance == "neutral"
+    assert captured["model"] == "deepseek-chat"
+    assert captured["response_format"] == {"type": "json_object"}
+    assert captured["reasoning_effort"] == "low"
+    assert captured["extra_body"] == {"thinking": {"type": "enabled"}}
+    assert "You must return a valid JSON object strictly matching this JSON schema:" in captured["messages"][0]["content"]
+
+
+def test_deepseek_adapter_strips_markdown_codeblock():
+    class ChatCompletions:
+        def create(self, **kwargs):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=(
+                                '```json\n{"stance":"neutral","confidence":"5",'
+                                '"observations":["Không có lợi thế rõ ràng."],'
+                                '"risks":[],"evidence_ids":["evidence-1"]}\n```'
+                            )
+                        )
+                    )
+                ]
+            )
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=ChatCompletions()))
+    adapter = DeepSeekStructuredClient(client)
+
+    parsed = adapter.generate(
+        stage="technical",
+        model="deepseek-chat",
+        thinking="low",
+        response_model=AnalystReport,
+        system_prompt="Bounded role",
+        payload={"evidence_ids": ["evidence-1"]},
+    )
+    assert parsed.stance == "neutral"
+
+
+def test_deepseek_adapter_raises_structured_output_error_on_empty_or_invalid():
+    empty = DeepSeekStructuredClient(
+        SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=lambda **kwargs: SimpleNamespace(
+                        choices=[SimpleNamespace(message=SimpleNamespace(content=""))]
+                    )
+                )
+            )
+        )
+    )
+    invalid = DeepSeekStructuredClient(
+        SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=lambda **kwargs: SimpleNamespace(
+                        choices=[SimpleNamespace(message=SimpleNamespace(content="{}"))]
+                    )
+                )
+            )
+        )
+    )
+
+    for client in (empty, invalid):
+        with pytest.raises(StructuredOutputError):
+            client.generate(
+                stage="technical",
+                model="deepseek-chat",
+                thinking="low",
+                response_model=AnalystReport,
+                system_prompt="Bounded role",
+                payload={"evidence_ids": ["evidence-1"]},
+            )
+
+
+def test_deepseek_adapter_handles_provider_errors_and_retries():
+    attempts = [0]
+
+    class RateLimitThenSuccess:
+        def create(self, **kwargs):
+            attempts[0] += 1
+            if attempts[0] == 1:
+                err = Exception("Rate limit hit")
+                setattr(err, "status_code", 429)
+                raise err
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=(
+                                '{"stance":"neutral","confidence":"5",'
+                                '"observations":["Không có lợi thế rõ ràng."],'
+                                '"risks":[],"evidence_ids":["evidence-1"]}'
+                            )
+                        )
+                    )
+                ]
+            )
+
+    slept: list[float] = []
+    client = SimpleNamespace(chat=SimpleNamespace(completions=RateLimitThenSuccess()))
+    adapter = DeepSeekStructuredClient(client, sleep=slept.append)
+
+    parsed = adapter.generate(
+        stage="technical",
+        model="deepseek-chat",
+        thinking="low",
+        response_model=AnalystReport,
+        system_prompt="Bounded role",
+        payload={"evidence_ids": ["evidence-1"]},
+    )
+    assert parsed.stance == "neutral"
+    assert attempts[0] == 2
+    assert len(slept) == 1
+
+    # Authentication failure raises ProviderError immediately
+    class AuthErrorClient:
+        def create(self, **kwargs):
+            err = Exception("Unauthorized")
+            setattr(err, "status_code", 401)
+            raise err
+
+    auth_client = SimpleNamespace(chat=SimpleNamespace(completions=AuthErrorClient()))
+    auth_adapter = DeepSeekStructuredClient(auth_client)
+    with pytest.raises(ProviderError) as exc_info:
+        auth_adapter.generate(
+            stage="technical",
+            model="deepseek-chat",
+            thinking="low",
+            response_model=AnalystReport,
+            system_prompt="Bounded role",
+            payload={"evidence_ids": ["evidence-1"]},
+        )
+    assert exc_info.value.category == "authentication"
+
+
+def test_deepseek_adapter_fallbacks_when_thinking_unsupported():
+    calls = []
+
+    class ChatCompletions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            if "extra_body" in kwargs:
+                raise Exception("extra_body thinking is unrecognized parameter")
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=(
+                                '{"stance":"neutral","confidence":"5",'
+                                '"observations":["Không có lợi thế rõ ràng."],'
+                                '"risks":[],"evidence_ids":["evidence-1"]}'
+                            )
+                        )
+                    )
+                ]
+            )
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=ChatCompletions()))
+    adapter = DeepSeekStructuredClient(client)
+
+    parsed = adapter.generate(
+        stage="technical",
+        model="deepseek-chat",
+        thinking="low",
+        response_model=AnalystReport,
+        system_prompt="Bounded role",
+        payload={"evidence_ids": ["evidence-1"]},
+    )
+    assert parsed.stance == "neutral"
+    assert len(calls) == 2
+    assert "extra_body" in calls[0]
+    assert "extra_body" not in calls[1]
+
+
+
 def test_provider_failure_does_not_retry_or_switch_provider():
     class FailingLLM:
         def __init__(self):
@@ -679,15 +888,15 @@ def test_committee_includes_prior_thesis_in_payload_and_records_continuity():
 
 
 def test_output_contract_states_the_reflection_window_cuts_both_ways():
-    """Cửa sổ ngắn không chứng minh được sai — và cũng không chứng minh được đúng."""
+    """A short window is insufficient to conclude wrong, and insufficient to conclude right."""
     from crypto_desk.committee import _system_prompt
 
     prompt = _system_prompt("manager")
 
-    assert "20 ngày" in prompt
-    assert "không đủ để kết luận luận điểm sai" in prompt
-    assert "không đủ để kết luận luận điểm đúng" in prompt
-    assert "cả hai chiều" in prompt
+    assert "20-day" in prompt
+    assert "insufficient to conclude a thesis is wrong" in prompt
+    assert "insufficient to conclude a thesis is right" in prompt
+    assert "both directions" in prompt
 
 
 def test_crypto_behaviour_is_unchanged_when_no_new_arguments_are_passed():
