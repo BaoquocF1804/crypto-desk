@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -21,8 +22,9 @@ from crypto_desk.commands import (
 )
 from crypto_desk.config import Settings
 from crypto_desk.dispatcher import CommandDispatcher, DispatchError, execution_mode
-from crypto_desk.domain import PortfolioSnapshot, TradeTicket, iso
+from crypto_desk.domain import PortfolioSnapshot, ResearchDecision, TradeTicket, iso
 from crypto_desk.execution import ExecutionResult
+from crypto_desk.service import AnalysisRun
 from crypto_desk.store import Store
 
 NOW = datetime(2026, 7, 18, 9, 0, tzinfo=UTC)
@@ -556,4 +558,49 @@ def test_dispatch_analyze_routes_vn_symbol(tmp_path: Path, monkeypatch):
     res3 = dispatcher.dispatch("vn-daily", {}, operator_email=OPERATOR)
     assert res3.status == "COMPLETED"
     assert res3.bucket == "2026-09-20"
+
+
+def test_dispatcher_analyze_and_daily_requests_broker(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    captured_kwargs: list[dict[str, Any]] = []
+
+    class CapturingService(FakeService):
+        def analyze(self, symbol: str):
+            self.calls.append(f"analyze:{symbol}")
+            return AnalysisRun(
+                run_id="run-1",
+                cutoff=iso(NOW),
+                decision=ResearchDecision(
+                    symbol="BTCUSDT",
+                    action="NO_TRADE",
+                    conviction=Decimal("0.5"),
+                    bull_case="bull",
+                    bear_case="bear",
+                    catalysts=(),
+                    invalidation="inv",
+                    entry=None,
+                    stop=None,
+                    target=None,
+                    evidence_ids=("ev-1",),
+                    reason="test",
+                    decided=True,
+                ),
+                current_price=Decimal("100000"),
+                report_dir=tmp_path / "report",
+                ticket_id=None,
+            )
+
+    dispatcher = CommandDispatcher(
+        settings,
+        service_factory=lambda **kwargs: captured_kwargs.append(kwargs) or CapturingService(),
+        store_factory=lambda: store,
+        now=lambda: NOW,
+    )
+    dispatcher.dispatch("analyze", {"symbol": "BTCUSDT"}, operator_email=OPERATOR)
+    dispatcher.dispatch("daily", {}, operator_email=OPERATOR)
+
+    assert len(captured_kwargs) == 2
+    assert all(kwargs.get("broker") is True for kwargs in captured_kwargs)
+
 

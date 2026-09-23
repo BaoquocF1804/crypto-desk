@@ -9,10 +9,11 @@ from typing import Any
 import crypto_desk.cli as cli
 import httpx
 import pytest
+from dataclasses import replace
 from typer.testing import CliRunner
 
 from crypto_desk.broker import SpotQuote
-from crypto_desk.cli import _hermes_installed, _structured_client, app, doctor_report
+from crypto_desk.cli import _hermes_installed, _service, _structured_client, app, doctor_report
 from crypto_desk.committee import (
     DeepSeekStructuredClient,
     GeminiStructuredClient,
@@ -1753,3 +1754,146 @@ def test_refresh_reflections_skips_runs_the_committee_never_decided(tmp_path: Pa
 
     assert saved == []
     assert rows == []
+
+
+def test_accumulate_syncs_the_portfolio_when_the_stored_snapshot_is_stale(tmp_path):
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    store.save_snapshot(
+        PortfolioSnapshot(
+            environment="testnet",
+            nav_usdt=Decimal("10000"),
+            free_usdt=Decimal("10000"),
+            positions=(),
+            open_orders=(),
+            as_of=(NOW - timedelta(days=3)).isoformat(),
+        )
+    )
+    service = CryptoDeskService(
+        settings,
+        store,
+        broker=FakeBroker(),
+        evidence_builder=FakeBuilder(),
+        committee=FakeCommittee(),
+        now=lambda: NOW,
+    )
+
+    result = service.analyze("BTCUSDT")
+
+    assert result.ticket_id is not None
+    assert store.ticket(result.ticket_id).status == "PENDING"
+    assert not (result.report_dir / "ticket_blocked.json").exists()
+
+
+def test_blocked_ticket_records_the_reason_in_the_run_artifacts(tmp_path):
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    service = CryptoDeskService(
+        settings,
+        store,
+        evidence_builder=FakeBuilder(),
+        committee=FakeCommittee(),
+        now=lambda: NOW,
+    )
+
+    result = service.analyze("BTCUSDT")
+
+    assert result.ticket_id is None
+    blocked_path = result.report_dir / "ticket_blocked.json"
+    assert blocked_path.exists()
+    payload = json.loads(blocked_path.read_text(encoding="utf-8"))
+    assert payload["reason"] == "no_portfolio_snapshot_within_5min"
+
+
+def test_broker_sync_failure_during_analyze_does_not_abort_the_run(tmp_path):
+    class ExplodingBroker:
+        def account_snapshot(self):
+            raise RuntimeError("network down")
+
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    service = CryptoDeskService(
+        settings,
+        store,
+        broker=ExplodingBroker(),
+        evidence_builder=FakeBuilder(),
+        committee=FakeCommittee(),
+        now=lambda: NOW,
+    )
+
+    result = service.analyze("BTCUSDT")
+
+    assert result.run_id is not None
+    assert (result.report_dir / "decision.json").exists()
+    assert result.ticket_id is None
+    blocked = json.loads((result.report_dir / "ticket_blocked.json").read_text(encoding="utf-8"))
+    assert blocked["reason"] == "no_portfolio_snapshot_within_5min"
+
+
+def test_snapshot_from_another_environment_never_mints_a_ticket(tmp_path):
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+
+    class MainnetBroker(FakeBroker):
+        def account_snapshot(self):
+            return PortfolioSnapshot(
+                environment="mainnet",
+                nav_usdt=Decimal("10000"),
+                free_usdt=Decimal("10000"),
+                positions=(),
+                open_orders=(),
+                as_of=NOW.isoformat(),
+            )
+
+    service = CryptoDeskService(
+        settings,
+        store,
+        broker=MainnetBroker(),
+        evidence_builder=FakeBuilder(),
+        committee=FakeCommittee(),
+        now=lambda: NOW,
+    )
+
+    result = service.analyze("BTCUSDT")
+
+    assert result.ticket_id is None
+    blocked = json.loads((result.report_dir / "ticket_blocked.json").read_text(encoding="utf-8"))
+    assert blocked["reason"] == "no_portfolio_snapshot_within_5min"
+
+
+def test_sync_snapshot_with_stale_update_time_is_rejected_as_unfresh(tmp_path):
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+
+    class StaleUpdateTimeBroker(FakeBroker):
+        def account_snapshot(self):
+            snapshot = super().account_snapshot()
+            return replace(snapshot, as_of=(NOW - timedelta(minutes=20)).isoformat())
+
+    service = CryptoDeskService(
+        settings,
+        store,
+        broker=StaleUpdateTimeBroker(),
+        evidence_builder=FakeBuilder(),
+        committee=FakeCommittee(),
+        now=lambda: NOW,
+    )
+
+    result = service.analyze("BTCUSDT")
+
+    assert result.ticket_id is None
+    blocked = json.loads((result.report_dir / "ticket_blocked.json").read_text(encoding="utf-8"))
+    assert blocked["reason"] == "no_portfolio_snapshot_within_5min"
+
+
+def test_service_analyze_succeeds_without_binance_credentials(tmp_path, monkeypatch):
+    monkeypatch.delenv("BINANCE_TESTNET_API_KEY", raising=False)
+    monkeypatch.delenv("BINANCE_TESTNET_API_SECRET", raising=False)
+    settings = make_settings(tmp_path)
+    service = _service(settings, broker=True, committee=False)
+    assert service.broker is None
+
+    result = service.analyze("BTCUSDT")
+    assert result.run_id is not None
+    assert (result.report_dir / "decision.json").exists()
+

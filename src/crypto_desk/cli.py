@@ -19,7 +19,7 @@ from google import genai
 from openai import OpenAI
 from pydantic import BaseModel
 
-from .broker import BinanceSpotBroker
+from .broker import BinanceSpotBroker, BrokerError
 from .committee import (
     CryptoCommittee,
     DeepSeekStructuredClient,
@@ -121,7 +121,7 @@ def analyze(ctx: typer.Context, symbol: str) -> None:
     normalized = symbol.upper()
     if normalized not in settings.symbols:
         _fail("Symbol is outside the configured allowlist")
-    service = _service(settings)
+    service = _service(settings, broker=True)
     result = service.analyze(normalized)
     _publish_dashboard_if_configured(settings)
     _emit(ctx, result)
@@ -134,7 +134,7 @@ def daily(
     catch_up: Annotated[bool, typer.Option("--catch-up")] = False,
 ) -> None:
     settings = _load(ctx)
-    result = _service(settings).daily(due=due, catch_up=catch_up)
+    result = _service(settings, broker=True).daily(due=due, catch_up=catch_up)
     if result.get("status") == "COMPLETED":
         _publish_dashboard_if_configured(settings)
     _emit(ctx, result)
@@ -567,7 +567,14 @@ def _service(
         PublicDataClient(settings.news_feeds),
         settings.coingecko_ids,
     )
-    selected_broker = _broker(settings) if broker else None
+    selected_broker = None
+    if broker:
+        try:
+            selected_broker = _broker(settings)
+        except (ValueError, BrokerError):
+            if execution:
+                raise
+            selected_broker = None
     selected_committee = None
     if committee:
         selected_committee = CryptoCommittee(

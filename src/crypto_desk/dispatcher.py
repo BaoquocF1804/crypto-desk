@@ -200,7 +200,7 @@ class CommandDispatcher:
 
             run = _vn_service(self.settings).analyze(args.symbol)
         elif args.symbol in self.settings.symbols:
-            run = self._service().analyze(args.symbol)
+            run = self._service(broker=True).analyze(args.symbol)
         else:
             raise DispatchError(
                 "VALIDATION_FAILED",
@@ -250,7 +250,7 @@ class CommandDispatcher:
         operator_email: str,
     ) -> SafeDailyResult:
         del args, operator_email
-        result = self._service().daily(due=False, catch_up=False)
+        result = self._service(broker=True).daily(due=False, catch_up=False)
         return SafeDailyResult(
             status=result["status"],
             bucket=str(result["bucket"]),

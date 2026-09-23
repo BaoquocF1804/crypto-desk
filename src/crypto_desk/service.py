@@ -199,7 +199,9 @@ class CryptoDeskService:
             decision,
             report_dir,
         )
-        ticket_id = self._create_ticket(decision, snapshot, effective_cutoff)
+        ticket_id, blocked_by = self._create_ticket(decision, snapshot, effective_cutoff)
+        if blocked_by:
+            self._write_json(report_dir / "ticket_blocked.json", {"reason": blocked_by})
         return AnalysisRun(
             run_id=run_id,
             cutoff=iso(effective_cutoff),
@@ -493,6 +495,35 @@ class CryptoDeskService:
             return True
         return False
 
+    @staticmethod
+    def _is_snapshot_fresh(
+        snapshot: PortfolioSnapshot | None,
+        target_env: str,
+        now: datetime,
+    ) -> bool:
+        if snapshot is None or snapshot.environment != target_env:
+            return False
+        try:
+            as_of = datetime.fromisoformat(snapshot.as_of).astimezone(UTC)
+        except (ValueError, TypeError):
+            return False
+        return as_of <= now and (now - as_of) <= timedelta(minutes=5)
+
+    def _fresh_portfolio(self, now: datetime) -> PortfolioSnapshot | None:
+        target_env = self.settings.binance.environment
+        snapshot = self.store.latest_snapshot(target_env)
+        if self._is_snapshot_fresh(snapshot, target_env, now):
+            return snapshot
+        if self.broker is None:
+            return None
+        try:
+            refreshed = self.sync()
+        except Exception:
+            return None
+        if self._is_snapshot_fresh(refreshed, target_env, now):
+            return refreshed
+        return None
+
     def _position_quantity(self, symbol: str) -> Decimal:
         snapshot = self.store.latest_snapshot(self.settings.binance.environment)
         if snapshot is None:
@@ -511,24 +542,21 @@ class CryptoDeskService:
         decision: ResearchDecision,
         evidence: EvidenceSnapshot | None,
         cutoff: datetime,
-    ) -> str | None:
+    ) -> tuple[str | None, str | None]:
         if decision.action not in {"ACCUMULATE", "REDUCE", "EXIT"} or evidence is None:
-            return None
+            return None, None
         now = self._now()
         if cutoff > now or now - cutoff > timedelta(minutes=5):
-            return None
-        portfolio = self.store.latest_snapshot(self.settings.binance.environment)
-        if portfolio is None or portfolio.environment != self.settings.binance.environment:
-            return None
+            return None, "cutoff_outside_5min_window"
+        portfolio = self._fresh_portfolio(now)
+        if portfolio is None:
+            return None, "no_portfolio_snapshot_within_5min"
         if decision.action == "ACCUMULATE" and any(
             position.get("unpriced") for position in portfolio.positions
         ):
-            return None
-        portfolio_as_of = datetime.fromisoformat(portfolio.as_of).astimezone(UTC)
-        if portfolio_as_of > now or now - portfolio_as_of > timedelta(minutes=5):
-            return None
+            return None, "unpriced_positions_block_accumulate"
         if decision.entry is None or decision.stop is None:
-            return None
+            return None, "decision_missing_entry_or_stop"
         current_gross = sum(
             (Decimal(position.get("value_usdt", "0")) for position in portfolio.positions),
             Decimal("0"),
@@ -569,7 +597,7 @@ class CryptoDeskService:
                     and int(order.get("orderListId", -1)) >= 0
                 }
                 if len(protection_ids) != 1:
-                    return None
+                    return None, "protection_order_list_ambiguous"
                 risk_snapshot["protection_list_client_order_id"] = protection_ids.pop()
                 sizing = size_sell(
                     action=decision.action,
@@ -590,10 +618,10 @@ class CryptoDeskService:
                 },
                 ttl_minutes=self.settings.risk.ticket_ttl_minutes,
             )
-        except ValueError:
-            return None
+        except ValueError as exc:
+            return None, f"sizing:{exc}"
         self.store.save_ticket(ticket)
-        return ticket.id
+        return ticket.id, None
 
     def _require_builder(self) -> Any:
         if self.evidence_builder is None:
