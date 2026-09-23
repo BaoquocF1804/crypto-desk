@@ -749,7 +749,7 @@ def test_provider_failure_does_not_retry_or_switch_provider():
 
     result = CryptoCommittee(llm, provider="gemini").run(valid_snapshot())
 
-    assert llm.calls == 1
+    assert llm.calls == 2
     assert result.decision.action == "NO_TRADE"
     assert result.decision.reason == "provider:rate_limit"
     assert result.calls[0].provider == "gemini"
@@ -956,4 +956,80 @@ def test_a_specialist_whose_evidence_is_absent_is_skipped_not_fatal():
     payload = committee._specialist_payload(snapshot, "cơ bản")
 
     assert payload is None
+
+
+def test_rate_limited_stage_is_retried_before_the_run_is_abandoned():
+    fake_llm = FakeLLM()
+    original_generate = fake_llm.generate
+    remaining = {"manager": 1}
+
+    def flaky(**kwargs):
+        stage = kwargs["stage"]
+        if remaining.get(stage):
+            remaining[stage] -= 1
+            raise ProviderError("rate_limit")
+        return original_generate(**kwargs)
+
+    fake_llm.generate = flaky
+
+    result = CryptoCommittee(fake_llm).run(valid_snapshot())
+
+    assert result.decision.decided is True
+    assert result.decision.action == "ACCUMULATE"
+    manager_calls = [call for call in result.calls if call.stage == "manager"]
+    assert [call.status for call in manager_calls] == ["failure", "success"]
+    assert manager_calls[0].error_category == "rate_limit"
+
+
+def test_authentication_error_aborts_the_run_without_retrying():
+    fake_llm = FakeLLM()
+    original_generate = fake_llm.generate
+
+    def unauthorized(**kwargs):
+        if kwargs["stage"] == "manager":
+            raise ProviderError("authentication")
+        return original_generate(**kwargs)
+
+    fake_llm.generate = unauthorized
+
+    result = CryptoCommittee(fake_llm).run(valid_snapshot())
+
+    assert result.decision.decided is False
+    manager_calls = [call for call in result.calls if call.stage == "manager"]
+    assert len(manager_calls) == 1
+    assert manager_calls[0].error_category == "authentication"
+
+
+def test_rate_limited_specialist_is_retried_and_later_reports_survive():
+    fake_llm = FakeLLM()
+    original_generate = fake_llm.generate
+    remaining = {"liquidity": 1}
+
+    def flaky(**kwargs):
+        stage = kwargs["stage"]
+        if remaining.get(stage):
+            remaining[stage] -= 1
+            raise ProviderError("rate_limit")
+        return original_generate(**kwargs)
+
+    fake_llm.generate = flaky
+
+    result = CryptoCommittee(fake_llm).run(valid_snapshot())
+
+    assert result.decision.decided is True
+    assert set(result.reports) == {
+        "technical",
+        "liquidity",
+        "news",
+        "derivatives",
+        "bull_round_1",
+        "bear_round_1",
+        "bull_round_2",
+        "bear_round_2",
+    }
+    liquidity_calls = [call for call in result.calls if call.stage == "liquidity"]
+    assert [call.status for call in liquidity_calls] == ["failure", "success"]
+    assert result.skipped_specialists == ()
+
+
 

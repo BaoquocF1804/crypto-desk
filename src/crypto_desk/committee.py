@@ -19,6 +19,7 @@ QUICK_MODEL = "gemini-3.6-flash"
 DEEP_MODEL = "gemini-3.6-flash"
 SPECIALISTS = ("technical", "liquidity", "news", "derivatives")
 MAX_ENTRY_DEVIATION = Decimal("0.02")
+RETRYABLE_PROVIDER_ERRORS = frozenset({"rate_limit", "network"})
 
 BASE_OUTPUT_CONTRACT = (
     "Mandatory rules:\n"
@@ -828,7 +829,9 @@ class CryptoCommittee:
                         error_category=exc.category,
                     )
                 )
-                raise
+                if attempt >= 2 or exc.category not in RETRYABLE_PROVIDER_ERRORS:
+                    raise
+                last_error = f"provider:{exc.category}"
             except (ValidationError, ValueError, TypeError) as exc:
                 calls.append(
                     ModelCall(
