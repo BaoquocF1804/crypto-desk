@@ -34,8 +34,8 @@ from .commands import (
     parse_args,
     ticket_fingerprint,
 )
-from .config import Settings, apply_model_preset
-from .domain import utcnow
+from .config import Settings, apply_model_preset, WATCHLIST_MAX_ACTIVE
+from .domain import iso, utcnow
 from .store import Store
 
 _DOCTOR_PACKAGES = (
@@ -207,10 +207,21 @@ class CommandDispatcher:
         elif args.symbol in effective_settings.symbols:
             run = self._service(broker=True, settings=effective_settings).analyze(args.symbol)
         else:
-            raise DispatchError(
-                "VALIDATION_FAILED",
-                "Symbol is outside the configured allowlist",
-            )
+            store = self._store()
+            try:
+                active = store.active_watchlist(iso(self.now()), WATCHLIST_MAX_ACTIVE)
+                is_active = any(row["symbol"] == args.symbol for row in active)
+            finally:
+                store.close()
+            if is_active:
+                run = self._service(broker=False, settings=effective_settings).analyze(
+                    args.symbol, research=True
+                )
+            else:
+                raise DispatchError(
+                    "VALIDATION_FAILED",
+                    "Symbol is outside the configured allowlist",
+                )
         decision = run.decision
         return SafeAnalyzeResult(
             run_id=run.run_id,

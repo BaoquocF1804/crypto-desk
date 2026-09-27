@@ -264,7 +264,7 @@ def apply_model_preset(settings: Settings, preset: str | None) -> Settings:
                 deep_thinking="high",
             ),
         )
-    elif normalized == "hybrid-deepseek":
+    elif normalized in {"hybrid-deepseek", "hybrid", "deepseek-hybrid"}:
         new_settings = replace(
             settings,
             models=replace(
@@ -276,7 +276,7 @@ def apply_model_preset(settings: Settings, preset: str | None) -> Settings:
                 deep_thinking="high",
             ),
         )
-    elif normalized in {"deepseek-pro", "deepseek_pro"}:
+    elif normalized in {"deepseek-pro", "deepseek_pro", "deepseek"}:
         new_settings = replace(
             settings,
             models=replace(

@@ -665,4 +665,64 @@ def test_dispatch_analyze_applies_model_preset(tmp_path: Path):
     assert excinfo.value.code == "INVALID_COMMAND"
 
 
+def test_dispatch_analyze_routes_active_watchlist_symbol(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    store.upsert_watchlist(
+        symbol="NEARUSDT",
+        coingecko_id="near",
+        scan_id="scan-1",
+        picked_at=iso(NOW),
+        expires_at=iso(NOW + timedelta(days=7)),
+        payload={
+            "evidence_score": "8.5",
+            "thesis": "High momentum",
+            "supporting_fields": ["ema20_gap_pct"],
+        },
+    )
+    captured_kwargs: list[dict] = []
+
+    class CapturingResearchService(FakeService):
+        def analyze(self, symbol: str, **kwargs):
+            captured_kwargs.append({"symbol": symbol, **kwargs})
+            return AnalysisRun(
+                run_id="run-research",
+                cutoff=iso(NOW),
+                decision=ResearchDecision(
+                    symbol=symbol,
+                    action="HOLD",
+                    conviction=Decimal("6.0"),
+                    bull_case="bull",
+                    bear_case="bear",
+                    catalysts=(),
+                    invalidation="inv",
+                    entry=None,
+                    stop=None,
+                    target=None,
+                    evidence_ids=("ev-1",),
+                    reason="test",
+                    decided=True,
+                ),
+                current_price=Decimal("5.5"),
+                report_dir=tmp_path / "report",
+                ticket_id=None,
+            )
+
+    dispatcher = CommandDispatcher(
+        settings,
+        service_factory=lambda **kwargs: CapturingResearchService(),
+        store_factory=lambda: store,
+        now=lambda: NOW,
+    )
+
+    res = dispatcher.dispatch(
+        "analyze",
+        {"symbol": "NEARUSDT", "model_preset": "hybrid-deepseek"},
+        operator_email=OPERATOR,
+    )
+    assert res.run_id == "run-research"
+    assert res.action == "HOLD"
+    assert captured_kwargs[0] == {"symbol": "NEARUSDT", "research": True}
+
+
 

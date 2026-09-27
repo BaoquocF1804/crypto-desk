@@ -130,8 +130,23 @@ class AnalyzeArgs(_Args):
         if value is None:
             return None
         norm = value.lower().strip()
-        if norm not in {"gemi-3.8", "hybrid-deepseek", "deepseek-pro"}:
+        if norm not in {
+            "gemi-3.8",
+            "gemini-3.8",
+            "hybrid-deepseek",
+            "hybrid",
+            "deepseek-hybrid",
+            "deepseek-pro",
+            "deepseek",
+            "deepseek_pro",
+        }:
             raise ValueError(f"Unknown model preset: {value}")
+        if norm in {"hybrid", "deepseek-hybrid"}:
+            return "hybrid-deepseek"
+        if norm in {"deepseek", "deepseek_pro"}:
+            return "deepseek-pro"
+        if norm == "gemini-3.8":
+            return "gemi-3.8"
         return norm
 
 

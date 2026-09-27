@@ -33,6 +33,7 @@ from .config import (
     MAINNET_GRADUATION_CHAINS,
     WATCHLIST_MAX_ACTIVE,
     Settings,
+    apply_model_preset,
     load_settings,
 )
 from .dashboard import (
@@ -126,8 +127,21 @@ def analyze(
     ctx: typer.Context,
     symbol: str,
     research: Annotated[bool, typer.Option("--research")] = False,
+    model_preset: Annotated[
+        str | None,
+        typer.Option(
+            "--model-preset",
+            "--preset",
+            help="Override models preset: gemi-3.8, hybrid-deepseek, deepseek-pro",
+        ),
+    ] = None,
 ) -> None:
     settings = _load(ctx)
+    if model_preset:
+        try:
+            settings = apply_model_preset(settings, model_preset)
+        except ValueError as exc:
+            _fail(str(exc))
     normalized = symbol.upper()
     if not research and normalized not in settings.symbols:
         _fail("Symbol is outside the configured allowlist")
