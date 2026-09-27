@@ -2453,3 +2453,49 @@ def test_a_failed_scan_leaves_the_watchlist_unchanged(tmp_path: Path):
         "provider:rate_limit"
     )
 
+
+def test_bad_evidence_on_a_research_coin_is_no_trade_before_any_model_call(tmp_path: Path):
+    # A wrong CoinGecko map or a stale feed fails in builder.build, before the committee.
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    _watch(store)
+    committee = FakeCommittee()
+    service = CryptoDeskService(
+        settings,
+        store,
+        evidence_builder=FakeBuilder(error="Cross-source price deviation 1.20% exceeds 0.5%"),
+        committee=committee,
+        now=lambda: NOW,
+    )
+
+    result = service.analyze("NEARUSDT", research=True)
+
+    assert (result.decision.action, result.decision.decided) == ("NO_TRADE", False)
+    assert result.decision.research_only is True
+    assert result.ticket_id is None
+    assert committee.calls == 0
+
+
+def test_research_runs_are_graded_as_the_watchlist_cohort(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    _watch(store, "NEARUSDT", expires=NOW - timedelta(days=1))  # expired, still graded
+    for run_id, symbol, research in (("near-run", "NEARUSDT", True), ("btc-run", "BTCUSDT", False)):
+        report_dir = tmp_path / run_id
+        report_dir.mkdir()
+        (report_dir / "evidence.json").write_text(
+            json.dumps({"binance_mid": "100"}), encoding="utf-8"
+        )
+        store.save_run(
+            run_id,
+            (NOW - timedelta(days=21)).isoformat(),
+            replace(_decided_hold(symbol), research_only=research),
+            report_dir,
+        )
+    service = CryptoDeskService(settings, store, evidence_builder=FakeBuilder(), now=lambda: NOW)
+
+    assert sorted(service.refresh_reflections(NOW)) == ["btc-run", "near-run"]
+    cohorts = {row["symbol"]: row["payload"]["cohort"] for row in store.list_reflections()}
+    assert cohorts == {"NEARUSDT": "watchlist", "BTCUSDT": "allowlist"}
+
+

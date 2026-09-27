@@ -17,6 +17,7 @@ def _reflection(
     benchmark: str | None = None,
     barrier: str | None = None,
     r_multiple: str | None = None,
+    cohort: str | None = None,
 ) -> dict:
     payload = {
         "realized_return": realized,
@@ -34,6 +35,8 @@ def _reflection(
     if barrier is not None:
         payload["barrier_outcome"] = barrier
         payload["r_multiple"] = r_multiple
+    if cohort is not None:
+        payload["cohort"] = cohort
     return {
         "run_id": f"{symbol}-{action}-{realized}-{cutoff}-{created_at}",
         "symbol": symbol,
@@ -250,3 +253,19 @@ def test_render_shows_one_table_per_benchmark():
 
     assert "VN30" in rendered
     assert rendered.count("Action") == 2
+
+
+def test_watchlist_research_is_scored_apart_from_the_allowlist():
+    card = build_scorecard(
+        [
+            _reflection("ETHUSDT", "ACCUMULATE", "0.05", benchmark="BTCUSDT"),
+            _reflection("NEARUSDT", "ACCUMULATE", "-0.03", benchmark="BTCUSDT", cohort="watchlist"),
+        ]
+    )
+
+    by = {group.cohort: group for group in card.groups}
+    assert set(by) == {"allowlist", "watchlist"}
+    assert by["watchlist"].scores[0].mean_return == Decimal("-0.03")
+    assert by["allowlist"].scores[0].mean_return == Decimal("0.05")
+    assert "watchlist (nghiên cứu)" in card.render()
+

@@ -21,6 +21,9 @@ Quyết định có entry/stop/target được chấm thêm theo mức nào ch�
 Nhiều lần chạy cùng symbol, cùng ngày, cùng action là cùng một quyết định bị
 lấy mẫu lại; chỉ lần muộn nhất được tính để một ngày chạy 40 lần không át các
 ngày khác.
+
+Run nghiên cứu từ watchlist của máy quét được chấm thành nhóm riêng (`cohort`),
+để thành tích của máy quét không trộn vào allowlist.
 """
 
 from __future__ import annotations
@@ -53,6 +56,7 @@ class ActionScore:
 @dataclass(frozen=True, slots=True)
 class BenchmarkGroup:
     benchmark: str
+    cohort: str
     inferred: bool
     scores: tuple[ActionScore, ...]
 
@@ -81,7 +85,8 @@ class Scorecard:
             return "\n".join(lines)
         for group in self.groups:
             lines.append("")
-            lines.append(f"Benchmark: {group.benchmark}")
+            label = " · watchlist (nghiên cứu)" if group.cohort == "watchlist" else ""
+            lines.append(f"Benchmark: {group.benchmark}{label}")
             if group.inferred:
                 lines.append(
                     "  Benchmark của nhóm này được suy ra từ symbol, không đọc từ dữ liệu."
@@ -142,13 +147,14 @@ def _benchmark_of(item: dict[str, Any]) -> tuple[str, bool]:
 
 
 def build_scorecard(reflections: list[dict[str, Any]]) -> Scorecard:
-    latest: dict[tuple[str, str, str, str], tuple[str, dict[str, Any]]] = {}
-    inferred_flags: dict[str, bool] = {}
+    latest: dict[tuple[str, str, str, str, str], tuple[str, dict[str, Any]]] = {}
+    inferred_flags: dict[tuple[str, str], bool] = {}
     skipped_no_action = 0
     skipped_unknown_action = 0
     for item in reflections:
         bench, inferred = _benchmark_of(item)
         payload = item["payload"]
+        cohort = str(payload.get("cohort") or "allowlist")
         action = payload.get("decision_action")
         if not action:
             skipped_no_action += 1
@@ -160,24 +166,26 @@ def build_scorecard(reflections: list[dict[str, Any]]) -> Scorecard:
         # Hàng cũ không có decision_cutoff: lùi về created_at, thô hơn nhưng vẫn
         # gộp được các lần chạy cùng ngày của cùng symbol.
         when = str(payload.get("decision_cutoff") or item["created_at"])
-        inferred_flags[bench] = inferred_flags.get(bench, False) or inferred
-        key = (bench, action, item["symbol"], when[:10])
+        group = (bench, cohort)
+        inferred_flags[group] = inferred_flags.get(group, False) or inferred
+        key = (bench, cohort, action, item["symbol"], when[:10])
         if key not in latest or when > latest[key][0]:
             latest[key] = (when, item)
-    buckets: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for (bench, action, _, _), (_, item) in latest.items():
-        buckets.setdefault((bench, action), []).append(item)
+    buckets: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for (bench, cohort, action, _, _), (_, item) in latest.items():
+        buckets.setdefault((bench, cohort, action), []).append(item)
     groups = tuple(
         BenchmarkGroup(
             benchmark=bench,
-            inferred=inferred_flags[bench],
+            cohort=cohort,
+            inferred=inferred_flags[(bench, cohort)],
             scores=tuple(
-                _score(action, bench, buckets[(bench, action)])
+                _score(action, bench, buckets[(bench, cohort, action)])
                 for action in ACTIONS
-                if (bench, action) in buckets
+                if (bench, cohort, action) in buckets
             ),
         )
-        for bench in sorted(inferred_flags)
+        for bench, cohort in sorted(inferred_flags)
     )
     counted = len(reflections) - skipped_no_action - skipped_unknown_action
     return Scorecard(

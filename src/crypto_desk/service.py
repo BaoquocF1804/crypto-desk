@@ -423,6 +423,7 @@ class CryptoDeskService:
         highs: tuple[Decimal, ...] = (),
         lows: tuple[Decimal, ...] = (),
         levels: tuple[Decimal, Decimal, Decimal] | None = None,
+        cohort: str | None = None,
     ) -> dict[str, Any]:
         if len(closes) < REFLECTION_HORIZON_DAYS:
             raise ValueError(
@@ -447,6 +448,8 @@ class CryptoDeskService:
             payload["decision_cutoff"] = decision_cutoff
         if benchmark_symbol is not None:
             payload["benchmark_symbol"] = benchmark_symbol
+        if cohort is not None:
+            payload["cohort"] = cohort
         if not self.store.save_reflection(
             run_id,
             symbol,
@@ -459,7 +462,8 @@ class CryptoDeskService:
         builder = self._require_builder()
         completed_before = iso(self._aware(cutoff) - timedelta(days=REFLECTION_HORIZON_DAYS))
         saved: list[str] = []
-        for run in self.store.unreflected_runs(completed_before, tuple(self.settings.symbols)):
+        symbols = tuple(self.settings.symbols) + self.store.watchlist_symbols()
+        for run in self.store.unreflected_runs(completed_before, symbols):
             # Lớp chặn evidence_ids không đủ: committee._no_trade truyền
             # evidence_ids của snapshot nên một lần rate limit vẫn lọt qua và
             # được chấm điểm như một quyết định.
@@ -505,6 +509,9 @@ class CryptoDeskService:
                     decision_action=str(run["decision"]["action"]),
                     decision_cutoff=str(run["cutoff"]),
                     benchmark_symbol=BENCHMARK_SYMBOL,
+                    # Read from the decision, not today's allowlist: promoting a coin later
+                    # must not move its research runs into the allowlist cohort.
+                    cohort="watchlist" if decision.get("research_only") else "allowlist",
                 )
             # One bad run must not stop the sweep: oldest runs go first, so an uncaught error
             # here repeats every day, and daily() grades before it analyses.
