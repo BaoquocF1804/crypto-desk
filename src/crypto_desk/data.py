@@ -312,6 +312,34 @@ class PublicDataClient:
         )
         return Fetched("coingecko", source, fetched_at, fetched_at, payload)
 
+    def ticker_24h_all(self) -> Fetched:
+        source, payload, fetched_at = self._json(SPOT_PUBLIC, "/api/v3/ticker/24hr", params={})
+        return Fetched("binance", source, fetched_at, fetched_at, payload)
+
+    def spot_exchange_info_all(self) -> Fetched:
+        source, payload, fetched_at = self._json(
+            SPOT_PUBLIC, "/api/v3/exchangeInfo", params={"permissions": "SPOT"}
+        )
+        return Fetched("binance", source, fetched_at, fetched_at, payload)
+
+    def futures_exchange_info(self) -> Fetched:
+        source, payload, fetched_at = self._json(FUTURES_PUBLIC, "/fapi/v1/exchangeInfo", params={})
+        return Fetched("binance-usdm", source, fetched_at, fetched_at, payload)
+
+    def premium_index_all(self) -> Fetched:
+        source, payload, fetched_at = self._json(FUTURES_PUBLIC, "/fapi/v1/premiumIndex", params={})
+        return Fetched("binance-usdm", source, fetched_at, fetched_at, payload)
+
+    def coingecko_markets(self) -> Fetched:
+        headers = {"x-cg-demo-api-key": self.coingecko_key} if self.coingecko_key else None
+        source, payload, fetched_at = self._json(
+            COINGECKO_PUBLIC,
+            "/coins/markets",
+            params={"vs_currency": "usd", "order": "market_cap_desc", "per_page": 250, "page": 1},
+            headers=headers,
+        )
+        return Fetched("coingecko", source, fetched_at, fetched_at, payload)
+
     def news(self) -> Fetched:
         fetched_at = _aware(self.now())
         if self._news_cache is not None:
@@ -473,12 +501,14 @@ class EvidenceBuilder:
         cutoff: datetime,
         *,
         live: bool = False,
+        coingecko_id: str | None = None,
     ) -> EvidenceSnapshot:
         cutoff = _aware(cutoff)
         cache_key = (symbol, cutoff, live)
         if cache_key in self._cache:
             return self._cache[cache_key]
-        if symbol not in self.coingecko_ids:
+        coingecko_id = coingecko_id or self.coingecko_ids.get(symbol)
+        if coingecko_id is None:
             raise EvidenceError(f"Missing CoinGecko id for {symbol}")
 
         exchange = self.client.exchange_info(symbol)
@@ -499,7 +529,7 @@ class EvidenceBuilder:
         open_interest = self.client.open_interest(symbol)
         if open_interest is None:
             raise EvidenceError("Missing open interest")
-        reference = self.client.coingecko(self.coingecko_ids[symbol])
+        reference = self.client.coingecko(coingecko_id)
         news = self.client.news()
 
         fetched = (
@@ -552,7 +582,7 @@ class EvidenceBuilder:
         mid = (bid + ask) / Decimal("2")
         spread = (ask - bid) / mid
 
-        coin = Decimal(str(reference.payload[self.coingecko_ids[symbol]]["usd"]))
+        coin = Decimal(str(reference.payload[coingecko_id]["usd"]))
         tether = Decimal(str(reference.payload["tether"]["usd"]))
         if coin <= 0 or tether <= 0:
             raise EvidenceError("Invalid CoinGecko reference price")
@@ -703,7 +733,7 @@ class EvidenceBuilder:
         }
         tagged_news = tag_news_relevance(
             recent_news,
-            news_aliases(rules.base_asset, self.coingecko_ids[symbol]),
+            news_aliases(rules.base_asset, coingecko_id),
         )
         news_payload = {
             "symbol": symbol,

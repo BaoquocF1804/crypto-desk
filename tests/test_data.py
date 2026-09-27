@@ -819,3 +819,43 @@ def test_spot_evidence_carries_price_structure_beside_technical_indicators():
     assert structure["swing_supports"] == []
     assert structure["swing_resistances"] == []
     assert spot.payload["technical_indicators"]["version"] == "technical-v1"
+
+
+def test_market_wide_endpoints_use_fixed_public_paths():
+    seen: list[tuple[str, str, dict[str, str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.host, request.url.path, dict(request.url.params)))
+        body = {"symbols": []} if request.url.path.endswith("exchangeInfo") else []
+        return httpx.Response(200, json=body)
+
+    client = PublicDataClient(
+        (), client=httpx.Client(transport=httpx.MockTransport(handler)), now=lambda: CUTOFF
+    )
+    client.ticker_24h_all()
+    client.spot_exchange_info_all()
+    client.futures_exchange_info()
+    client.premium_index_all()
+    client.coingecko_markets()
+
+    assert seen == [
+        ("api.binance.com", "/api/v3/ticker/24hr", {}),
+        ("api.binance.com", "/api/v3/exchangeInfo", {"permissions": "SPOT"}),
+        ("fapi.binance.com", "/fapi/v1/exchangeInfo", {}),
+        ("fapi.binance.com", "/fapi/v1/premiumIndex", {}),
+        (
+            "api.coingecko.com",
+            "/api/v3/coins/markets",
+            {"vs_currency": "usd", "order": "market_cap_desc", "per_page": "250", "page": "1"},
+        ),
+    ]
+
+
+def test_evidence_builder_takes_a_coingecko_id_for_symbols_outside_its_map():
+    builder = EvidenceBuilder(FakePublicClient(), {})
+
+    with pytest.raises(EvidenceError, match="Missing CoinGecko id"):
+        builder.build("BTCUSDT", CUTOFF)
+    snapshot = builder.build("BTCUSDT", CUTOFF, coingecko_id="bitcoin")
+
+    assert snapshot.reference_usdt == Decimal("100000")
