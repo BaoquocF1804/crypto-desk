@@ -587,8 +587,12 @@ class CryptoDeskService:
         if decision.action not in {"ACCUMULATE", "REDUCE", "EXIT"} or evidence is None:
             return None, None
         now = self._now()
-        if cutoff > now or now - cutoff > timedelta(minutes=5):
-            return None, "cutoff_outside_5min_window"
+        # Price safety lives at submit, which re-quotes the book and refuses a limit more than
+        # max_quote_deviation away. A 5-minute window here only discarded valid decisions from
+        # a slow committee (SOL: 5m27s); what stays refused is a replay older than a ticket's
+        # own lifetime, or a cutoff in the future.
+        if cutoff > now or now - cutoff > timedelta(minutes=self.settings.risk.ticket_ttl_minutes):
+            return None, "cutoff_outside_ticket_ttl"
         portfolio = self._fresh_portfolio(now)
         if portfolio is None:
             return None, "no_portfolio_snapshot_within_5min"

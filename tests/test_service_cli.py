@@ -1982,6 +1982,72 @@ def test_blocked_ticket_records_the_reason_in_the_run_artifacts(tmp_path):
     assert payload["reason"] == "no_portfolio_snapshot_within_5min"
 
 
+def test_a_slow_committee_still_mints_a_ticket(tmp_path):
+    # SOL 27/09: 5m27s of LLM calls blocked a valid ACCUMULATE. Price safety lives at submit,
+    # which re-quotes the book and refuses a limit more than max_quote_deviation away.
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    finished = NOW + timedelta(minutes=6)
+    clock = {"now": NOW}
+    # The broker sync at ticket time would produce this snapshot.
+    store.save_snapshot(
+        PortfolioSnapshot(
+            environment="testnet",
+            nav_usdt=Decimal("10000"),
+            free_usdt=Decimal("10000"),
+            positions=(),
+            open_orders=(),
+            as_of=finished.isoformat(),
+        )
+    )
+
+    class _SlowCommittee(FakeCommittee):
+        def run(self, snapshot, *args, **kwargs):
+            clock["now"] = finished
+            return super().run(snapshot, *args, **kwargs)
+
+    service = CryptoDeskService(
+        settings,
+        store,
+        evidence_builder=FakeBuilder(),
+        committee=_SlowCommittee(),
+        now=lambda: clock["now"],
+    )
+
+    result = service.analyze("BTCUSDT")
+
+    assert result.ticket_id is not None
+    assert not (result.report_dir / "ticket_blocked.json").exists()
+
+
+def test_an_analysis_older_than_a_ticket_lifetime_never_mints_one(tmp_path):
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    store.save_snapshot(
+        PortfolioSnapshot(
+            environment="testnet",
+            nav_usdt=Decimal("10000"),
+            free_usdt=Decimal("10000"),
+            positions=(),
+            open_orders=(),
+            as_of=NOW.isoformat(),
+        )
+    )
+    service = CryptoDeskService(
+        settings,
+        store,
+        evidence_builder=FakeBuilder(),
+        committee=FakeCommittee(),
+        now=lambda: NOW,
+    )
+
+    result = service.analyze("BTCUSDT", NOW - timedelta(minutes=31))
+
+    assert result.ticket_id is None
+    blocked = json.loads((result.report_dir / "ticket_blocked.json").read_text(encoding="utf-8"))
+    assert blocked["reason"] == "cutoff_outside_ticket_ttl"
+
+
 def test_broker_sync_failure_during_analyze_does_not_abort_the_run(tmp_path):
     class ExplodingBroker:
         def account_snapshot(self):
