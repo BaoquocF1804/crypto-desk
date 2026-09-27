@@ -103,15 +103,15 @@ class FakeBuilder:
             raise EvidenceError(self.error)
         return make_snapshot(symbol)
 
-    def reflection_closes(
+    def reflection_bars(
         self,
         symbol: str,
         start: datetime,
         periods: int = 20,
-    ) -> tuple[Decimal, ...]:
+    ) -> tuple[tuple[Decimal, Decimal, Decimal], ...]:
         del start
         base = Decimal("100") if symbol == "BTCUSDT" else Decimal("50")
-        return tuple(base + index for index in range(periods))
+        return tuple((base + index + 1, base + index - 1, base + index) for index in range(periods))
 
 
 class FakeCommittee:
@@ -470,18 +470,68 @@ def test_daily_catch_up_uses_most_recent_missing_utc_day(tmp_path):
     settings = make_settings(tmp_path)
     store = Store(settings.database)
     store.mark_scheduled("daily", "2026-07-17")
+    builder = FakeBuilder()
     service = CryptoDeskService(
         settings,
         store,
-        evidence_builder=FakeBuilder(),
+        evidence_builder=builder,
         committee=FakeCommittee(),
         now=lambda: NOW,
     )
 
     result = service.daily(catch_up=True)
 
-    assert result["status"] == "COMPLETED"
+    assert result["status"] == "REFLECTIONS_ONLY"
     assert result["bucket"] == "2026-07-16"
+    assert result["run_ids"] == []
+    assert builder.calls == []
+
+
+def test_daily_catch_up_before_schedule_only_replays_reflections(tmp_path):
+    settings = make_settings(tmp_path)
+    builder = FakeBuilder()
+    service = CryptoDeskService(
+        settings,
+        Store(settings.database),
+        evidence_builder=builder,
+        committee=FakeCommittee(),
+        now=lambda: NOW - timedelta(minutes=1),
+    )
+
+    result = service.daily(catch_up=True)
+
+    assert result["status"] == "REFLECTIONS_ONLY"
+    assert result["bucket"] == "2026-07-16"
+    assert builder.calls == []
+
+
+def test_daily_builds_live_evidence_instead_of_backdated_cutoff(tmp_path):
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+
+    class ClockAwareBuilder(FakeBuilder):
+        def __init__(self):
+            super().__init__()
+            self.live_flags: list[bool] = []
+
+        def build(self, symbol, cutoff, *, live=False):
+            self.live_flags.append(live)
+            return super().build(symbol, cutoff, live=live)
+
+    builder = ClockAwareBuilder()
+    service = CryptoDeskService(
+        settings,
+        store,
+        evidence_builder=builder,
+        committee=FakeCommittee(),
+        now=lambda: NOW,
+    )
+
+    result = service.daily()
+
+    assert result["status"] == "COMPLETED"
+    assert result["run_ids"]
+    assert builder.live_flags and all(builder.live_flags)
 
 
 def test_health_detects_stop_breach_even_when_protection_exists(tmp_path):
@@ -715,6 +765,65 @@ def test_reflection_calculates_return_excursions_and_benchmark_alpha():
     assert result["alpha"] == Decimal("0.05")
 
 
+def _barrier(highs, lows, closes):
+    return calculate_reflection(
+        entry=Decimal("100"),
+        closes=tuple(Decimal(value) for value in closes),
+        benchmark_closes=(),
+        highs=tuple(Decimal(value) for value in highs),
+        lows=tuple(Decimal(value) for value in lows),
+        levels=(Decimal("100"), Decimal("95"), Decimal("110")),
+    )
+
+
+def test_reflection_scores_a_setup_that_reaches_target_first_as_plus_rr():
+    result = _barrier(highs=("104", "111"), lows=("97", "99"), closes=("103", "108"))
+
+    assert result["barrier_outcome"] == "target"
+    assert result["r_multiple"] == Decimal("2")
+
+
+def test_reflection_scores_a_setup_that_reaches_stop_first_as_minus_one_r():
+    result = _barrier(highs=("104", "120"), lows=("94", "99"), closes=("96", "115"))
+
+    assert result["barrier_outcome"] == "stop"
+    assert result["r_multiple"] == Decimal("-1")
+
+
+def test_reflection_counts_a_day_touching_both_levels_as_stopped():
+    # Nến ngày không cho biết mức nào chạm trước; chọn kết quả xấu hơn.
+    result = _barrier(highs=("112",), lows=("94",), closes=("100",))
+
+    assert result["barrier_outcome"] == "stop"
+
+
+def test_reflection_marks_an_unresolved_setup_to_the_last_close_in_r():
+    result = _barrier(highs=("104", "106"), lows=("97", "98"), closes=("101", "102.5"))
+
+    assert result["barrier_outcome"] == "open"
+    assert result["r_multiple"] == Decimal("0.5")
+
+
+def test_reflection_excursions_use_intraday_extremes_when_supplied():
+    result = _barrier(highs=("104", "106"), lows=("97", "98"), closes=("101", "102.5"))
+
+    assert result["maximum_adverse_excursion"] == Decimal("-0.03")
+    assert result["maximum_favorable_excursion"] == Decimal("0.06")
+
+
+def test_reflection_without_levels_has_no_barrier_outcome():
+    result = calculate_reflection(
+        entry=Decimal("100"),
+        closes=(Decimal("101"),),
+        benchmark_closes=(),
+        highs=(Decimal("112"),),
+        lows=(Decimal("94"),),
+    )
+
+    assert "barrier_outcome" not in result
+    assert "r_multiple" not in result
+
+
 def test_daily_schedules_due_reflections_once(tmp_path: Path):
     settings = make_settings(tmp_path)
     store = Store(settings.database)
@@ -763,6 +872,42 @@ def test_daily_schedules_due_reflections_once(tmp_path: Path):
     assert reflection["payload"]["decision_cutoff"] == (NOW - timedelta(days=21)).isoformat()
     assert reflection["payload"]["horizon_days"] == 20
     assert reflection["created_at"][:10] != reflection["payload"]["decision_cutoff"][:10]
+
+
+def test_refresh_reflections_grades_the_decisions_own_levels(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    report_dir = tmp_path / "setup-run"
+    report_dir.mkdir()
+    (report_dir / "evidence.json").write_text(json.dumps({"binance_mid": "100"}), encoding="utf-8")
+    store.save_run(
+        "setup-run",
+        (NOW - timedelta(days=21)).isoformat(),
+        ResearchDecision(
+            symbol="BTCUSDT",
+            action="NO_TRADE",
+            conviction=Decimal("5"),
+            bull_case="Bull",
+            bear_case="Bear",
+            catalysts=(),
+            invalidation="Invalidation",
+            entry=Decimal("100"),
+            stop=Decimal("95"),
+            target=Decimal("110"),
+            evidence_ids=("evidence-1",),
+            reason="committee decision",
+        ),
+        report_dir,
+    )
+    service = CryptoDeskService(settings, store, evidence_builder=FakeBuilder(), now=lambda: NOW)
+
+    assert service.refresh_reflections(NOW) == ["setup-run"]
+    payload = store.list_reflections("BTCUSDT")[0]["payload"]
+
+    # Fixture highs are close + 1, so 110 is touched on the tenth day.
+    assert payload["barrier_outcome"] == "target"
+    assert Decimal(payload["r_multiple"]) == Decimal("2")
+    assert Decimal(payload["maximum_adverse_excursion"]) == Decimal("-0.01")
 
 
 def test_json_doctor_reports_secret_presence_without_values(
@@ -1345,13 +1490,13 @@ def test_analyze_links_with_prior_valid_run(tmp_path: Path):
     assert run_1.decision.thesis_continuity == "NEW"
     assert committee.last_prior_thesis is None
 
-    # Second analyze run 4 hours later
-    current_time = NOW + timedelta(hours=4)
+    # Second analyze run 5 hours later
+    current_time = NOW + timedelta(hours=5)
     run_2 = service.analyze("BTCUSDT")
 
     assert committee.last_prior_thesis is not None
     assert committee.last_prior_thesis["run_id"] == run_1.run_id
-    assert committee.last_prior_thesis["hours_ago"] == "4.0"
+    assert committee.last_prior_thesis["hours_ago"] == "5.0"
     assert committee.last_prior_thesis["prior_price"] == "100"
     assert committee.last_prior_thesis["current_price"] == "100"
     assert committee.last_prior_thesis["action"] == "ACCUMULATE"
@@ -1364,6 +1509,38 @@ def test_analyze_links_with_prior_valid_run(tmp_path: Path):
     report_text = (run_2.report_dir / "report.md").read_text(encoding="utf-8")
     assert "## Đối soát Luận điểm Trước (Thesis Tracking)" in report_text
     assert run_1.run_id in report_text
+
+
+def test_a_rerun_minutes_later_does_not_inherit_its_own_fresh_thesis(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    store.save_snapshot(
+        PortfolioSnapshot(
+            environment="testnet",
+            nav_usdt=Decimal("10000"),
+            free_usdt=Decimal("10000"),
+            positions=(),
+            open_orders=(),
+            as_of=NOW.isoformat(),
+        )
+    )
+    committee = FakeCommittee()
+    current_time = NOW
+    service = CryptoDeskService(
+        settings,
+        store,
+        evidence_builder=FakeBuilder(),
+        committee=committee,
+        now=lambda: current_time,
+    )
+    service.analyze("BTCUSDT")
+
+    # Cùng nến 4H đã đóng: đưa quyết định vừa ra vào lại chỉ lặp một mẫu ngẫu nhiên.
+    current_time = NOW + timedelta(minutes=10)
+    rerun = service.analyze("BTCUSDT")
+
+    assert committee.last_prior_thesis is None
+    assert rerun.decision.thesis_continuity == "NEW"
 
 
 def test_latest_valid_run_respects_before_cutoff(tmp_path: Path):
@@ -1742,8 +1919,8 @@ def test_refresh_reflections_skips_runs_the_committee_never_decided(tmp_path: Pa
     )
 
     class _Builder:
-        def reflection_closes(self, symbol, start, periods=20):
-            return tuple(Decimal("100") for _ in range(20))
+        def reflection_bars(self, symbol, start, periods=20):
+            return tuple((Decimal("100"),) * 3 for _ in range(20))
 
     service = CryptoDeskService(settings, store, evidence_builder=_Builder())
     try:
@@ -1897,3 +2074,52 @@ def test_service_analyze_succeeds_without_binance_credentials(tmp_path, monkeypa
     assert result.run_id is not None
     assert (result.report_dir / "decision.json").exists()
 
+
+def _reflection_row(cutoff: str, action: str = "NO_TRADE", **extra) -> dict:
+    return {
+        "run_id": cutoff,
+        "symbol": "ETHUSDT",
+        "created_at": "2026-09-27T00:15:00+00:00",
+        "payload": {
+            "decision_action": action,
+            "decision_cutoff": cutoff,
+            "horizon_days": 20,
+            "realized_return": "0.03",
+            **extra,
+        },
+    }
+
+
+def test_prompt_reflections_keep_the_latest_decision_of_each_day():
+    from crypto_desk.service import prompt_reflections
+
+    lines = prompt_reflections(
+        [
+            _reflection_row("2026-07-17T01:00:00+00:00"),
+            _reflection_row("2026-07-17T09:00:00+00:00", "HOLD"),
+            _reflection_row("2026-07-17T05:00:00+00:00"),
+            _reflection_row("2026-07-16T05:00:00+00:00"),
+        ]
+    )
+
+    assert len(lines) == 2
+    assert lines[0].startswith("2026-07-17") and "decision HOLD" in lines[0]
+    assert lines[1].startswith("2026-07-16")
+
+
+def test_prompt_reflections_are_capped_at_five_days():
+    from crypto_desk.service import prompt_reflections
+
+    rows = [_reflection_row(f"2026-07-{day:02d}T00:00:00+00:00") for day in range(1, 9)]
+
+    assert len(prompt_reflections(rows)) == 5
+
+
+def test_render_reflection_states_which_setup_level_was_hit_first():
+    from crypto_desk.service import render_reflection
+
+    line = render_reflection(
+        _reflection_row("2026-07-17T01:00:00+00:00", barrier_outcome="stop", r_multiple="-1")
+    )
+
+    assert "setup hit stop first (-1.00R)" in line

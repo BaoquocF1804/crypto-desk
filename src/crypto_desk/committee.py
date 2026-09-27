@@ -20,7 +20,19 @@ DEEP_MODEL = "gemini-3.6-flash"
 SPECIALISTS = ("technical", "liquidity", "news", "derivatives")
 MAX_ENTRY_DEVIATION = Decimal("0.02")
 MIN_GROSS_RISK_REWARD = Decimal("1.5")
+# Calibration knob: the thesis runs for REFLECTION_HORIZON_DAYS, so a stop tighter than one daily
+# true range is stopped by ordinary noise; a 4H floor let the manager pick 0.4x daily ATR stops
+# that only existed to clear the R:R gate.
+MIN_STOP_ATR_MULTIPLE = Decimal("1")
 RETRYABLE_PROVIDER_ERRORS = frozenset({"rate_limit", "network"})
+RR_CLAIM = re.compile(
+    r"\bR\s*:\s*R\b|\b(?:risk|reward)(?:[\s/-]+to)?[\s/-]+(?:risk|reward)\b",
+    re.IGNORECASE,
+)
+SPOT_LEVEL_CLAIM = re.compile(
+    r"\b(?:entry|stop|target)\b[^.!?]{0,80}?\b\d[\d,]*(?:\.\d+)?\s*USDT\b",
+    re.IGNORECASE,
+)
 
 BASE_OUTPUT_CONTRACT = (
     "Mandatory rules:\n"
@@ -36,7 +48,10 @@ BASE_OUTPUT_CONTRACT = (
     "- State uncertainty when data is missing or signals conflict; do not speculate on article content "
     "beyond the headline.\n"
     "- Return only a valid JSON object matching the schema, with no Markdown or exterior text.\n"
-    "- evidence_ids must only contain IDs present in the provided evidence_ids list."
+    "- evidence_ids must only contain IDs present in the provided evidence_ids list.\n"
+    f"- The desk works on a {REFLECTION_HORIZON_DAYS}-day thesis horizon. Hour-scale readings "
+    "(top-of-book depth or imbalance, hourly flows or open-interest moves) describe execution "
+    "conditions; they cannot by themselves justify accepting or rejecting the thesis."
 )
 
 REFLECTION_CLAUSE = (
@@ -51,10 +66,14 @@ OUTPUT_CONTRACT = f"{BASE_OUTPUT_CONTRACT}\n{REFLECTION_CLAUSE}"
 ROLE_PROMPTS = {
     "technical": (
         "You are a technical analyst for medium-term crypto Spot investment. "
-        "Use only supplied Daily/4H Spot closes and current Spot mid, all in USDT. "
+        "Use only supplied Daily/4H Spot closes, technical_indicators, and current Spot mid, "
+        "all in USDT. EMA20/EMA50 describe the Daily trend; RSI14 describes 4H momentum; "
+        "ATR14 is the average 4H/Daily true range in USDT. "
+        "Identify each indicator's timeframe and closed-candle as_of timestamp. "
         "Derive trends, momentum, volatility, and potential support/resistance only when the "
         "series supports them; show the input prices for any computed return or level. "
-        "Do not cite RSI, MACD, moving averages, or any other indicator absent from the snapshot. "
+        "Do not cite unavailable indicator values, MACD, or any other indicator absent from "
+        "the snapshot. Do not treat an indicator alone as an entry trigger. "
         "State a conditional invalidation and explain "
         "weak, missing, or conflicting timeframe signals."
     ),
@@ -63,7 +82,11 @@ ROLE_PROMPTS = {
         "depth, symbol rules, and 24-hour quote volume. Distinguish 24-hour turnover from "
         "immediately executable depth. Estimate executable size or slippage only when the "
         "provided bid/ask prices and quantities permit the calculation; otherwise state the "
-        "missing data. Do not claim unseen orders or market-maker intent."
+        "missing data. Do not claim unseen orders or market-maker intent. Quote book totals, "
+        "notional and the ask/bid ratio from depth_summary instead of adding levels yourself. "
+        "The book holds only the top 20 levels and depth_summary.price_band_pct is the price "
+        "span they cover; use it to judge whether the planned order fills without material "
+        "slippage. Book imbalance is not a directional signal, support, or resistance."
     ),
     "news": (
         "You are a news analyst. Use only title, URL, published_at, content_hash, and "
@@ -79,7 +102,11 @@ ROLE_PROMPTS = {
         "You are a positioning signal specialist from Binance USDⓈ-M Futures. "
         "Evaluate only available funding rate/trend, open interest and its change, Global "
         "Long/Short account ratio, Top Trader position ratio, and Taker Buy/Sell ratio. "
-        "These are positioning signals, not Spot prices or proof of a squeeze. Call out null "
+        "These are positioning signals, not Spot prices or proof of a squeeze. Long/short "
+        "ratio levels differ structurally by symbol: judge crowding from "
+        "long_short_ratio_pctile_20d and top_trader_ratio_pctile_20d (the latest value's rank "
+        "within about 20 days, 0-100), never from the raw ratio alone. Read flow from "
+        "oi_change_24h_pct and taker_buy_sell_ratio_24h. Call out null "
         "fields; describe crowd/whale divergence, squeeze risk, or leverage overload only when "
         "the corresponding figures support the claim. Separate observed data from scenarios."
     ),
@@ -113,13 +140,24 @@ ROLE_PROMPTS = {
         "select NEW. Avoid unjustified signal reversals if price structure and prior thesis remain intact. "
         "ACCUMULATE only with a clear upside edge. HOLD when holding is sound but upside edge is insufficient "
         "to add. REDUCE or EXIT only when position_quantity > 0 and evidence supports it. NO_TRADE when there "
-        "is no clear edge or theses conflict. Entry, stop, target, and numeric invalidation "
+        "is no clear edge or theses conflict. Call positioning crowded only when its "
+        "pctile_20d is high, not from a raw long/short level. "
+        "Entry, stop, target, and numeric invalidation "
         "must use Spot USDT prices anchored to the snapshot; entry must be within 2% of Spot mid. "
-        "Before ACCUMULATE, calculate gross R:R = (target - entry) / (entry - stop) "
-        "and require R:R >= 1.5. Do not claim net R:R without cost evidence. If a defensible "
+        "Before ACCUMULATE, internally calculate gross R:R = (target - entry) / (entry - stop) "
+        "and require R:R >= 1.5. An ACCUMULATE stop must sit at least one "
+        "technical_indicators.atr14_1d below entry; tighter stops are rejected. Place the stop "
+        "at a level whose break invalidates the thesis, then find a target that clears R:R; "
+        "if none does, choose HOLD or NO_TRADE rather than tightening the stop. "
+        "For every action, provide either all three Spot levels "
+        "(entry, stop, target) or all three as null. The application validates those levels "
+        "and appends the computed gross R:R to the final decision. Do not state an R:R value "
+        "or quote entry, stop, or target prices in decision_reason; the application presents "
+        "those levels separately. Do not claim R:R is unquantifiable; explain the evidence behind "
+        "the action. Do not claim net R:R without cost evidence. If a defensible "
         "stop or target is unavailable, choose HOLD or NO_TRADE. For HOLD or NO_TRADE, "
         "decision_reason must state a quantitative reason for not adding, citing a supplied "
-        "metric, computed R:R, or missing evidence count; state when R:R is unquantifiable. "
+        "metric or missing evidence count. "
         "Fill decision_reason for every action and keep bull_case, bear_case, catalysts, and "
         "invalidation concise and specific.\n"
         "Provide futures_bias (BULLISH, BEARISH, or NEUTRAL). futures_setups are non-executing "
@@ -133,11 +171,18 @@ ROLE_PROMPTS = {
 SPECIALIST_EVIDENCE = {
     "technical": (
         "spot",
-        ("symbol", "mid", "change_24h_pct", "daily_closes", "four_hour_closes"),
+        (
+            "symbol",
+            "mid",
+            "change_24h_pct",
+            "daily_closes",
+            "four_hour_closes",
+            "technical_indicators",
+        ),
     ),
     "liquidity": (
         "spot",
-        ("symbol", "mid", "spread", "quote_volume", "depth", "rules"),
+        ("symbol", "mid", "spread", "quote_volume", "depth", "depth_summary", "rules"),
     ),
     "news": ("news", ("symbol", "items", "symbol_news_count")),
     "derivatives": (
@@ -147,10 +192,12 @@ SPECIALIST_EVIDENCE = {
             "funding_rate",
             "open_interest",
             "funding_rate_trend",
-            "oi_change_1h_pct",
             "long_short_ratio",
             "top_trader_ratio",
-            "taker_buy_sell_ratio",
+            "oi_change_24h_pct",
+            "taker_buy_sell_ratio_24h",
+            "long_short_ratio_pctile_20d",
+            "top_trader_ratio_pctile_20d",
         ),
     ),
 }
@@ -227,8 +274,9 @@ class ManagerDecision(BaseModel):
     decision_reason: str = Field(
         min_length=1,
         max_length=1000,
-        description="English decision rationale. For HOLD/NO_TRADE, quantify why adding is rejected; "
-        "for ACCUMULATE, include the calculated gross reward/risk.",
+        description="English decision rationale with a supplied quantitative metric. "
+        "Do not state R:R or quote entry, stop, or target prices; the application "
+        "validates those levels and computes R:R.",
     )
     bull_case: str = Field(min_length=1, max_length=2000, description="Written in English.")
     bear_case: str = Field(min_length=1, max_length=2000, description="Written in English.")
@@ -542,10 +590,16 @@ class GeminiStructuredClient:
 
                     cleaned = _strip_unsupported(response_model.model_json_schema())
                     response_schema = _transformers.t_schema(None, cleaned)
+                    # Gemini 3 silently skips thinking when thinking_budget meets a
+                    # response_schema; it only honours thinking_level.
                     thinking_config = (
-                        types.ThinkingConfig(thinking_budget=1024 if thinking == "low" else 2048)
-                        if thinking in {"low", "high"}
-                        else None
+                        None
+                        if thinking not in {"low", "high"}
+                        else types.ThinkingConfig(thinking_level=thinking)
+                        if model.startswith("gemini-3")
+                        else types.ThinkingConfig(
+                            thinking_budget=1024 if thinking == "low" else 2048
+                        )
                     )
                     timeout_ms = int(self.request_timeout_seconds * 1000)
                     res = self.client.models.generate_content(
@@ -745,23 +799,32 @@ class CryptoCommittee:
                         calls=calls,
                     )
 
-            manager = self._call(
-                stage="manager",
-                model=self.deep_model,
-                thinking=self.deep_thinking,
-                response_model=self.manager_model,
-                system_prompt=self._role_system_prompt("manager"),
-                payload={
+            manager_call = {
+                "model": self.deep_model,
+                "thinking": self.deep_thinking,
+                "response_model": self.manager_model,
+                "system_prompt": self._role_system_prompt("manager"),
+                "payload": {
                     **payload,
                     "stage": "manager",
                     "skipped_specialists": tuple(skipped),
                     "reports": self._reports_payload(reports),
                 },
-                valid_evidence_ids=snapshot.evidence_ids,
-                snapshot_mid=snapshot.mid,
-                position_quantity=position_quantity,
-                calls=calls,
-            )
+                "valid_evidence_ids": snapshot.evidence_ids,
+                "snapshot_mid": snapshot.mid,
+                "position_quantity": position_quantity,
+                "atr14_1d": self._atr14_1d(snapshot),
+                "session_limits": self._session_limits(snapshot),
+                "calls": calls,
+            }
+            manager = self._call(stage="manager", **manager_call)
+            unconfirmed = False
+            if manager.action == "ACCUMULATE":
+                # Identical evidence minutes apart yielded NO_TRADE and then ACCUMULATE, so one
+                # sample is not a decision. Only the action that opens risk pays for a rerun.
+                confirmation = self._call(stage="manager_confirm", **manager_call)
+                if confirmation.action != "ACCUMULATE":
+                    manager, unconfirmed = confirmation, True
         except (CommitteeOutputError, ProviderError) as exc:
             return CommitteeResult(
                 decision=self._no_trade(snapshot, str(exc)),
@@ -788,7 +851,15 @@ class CryptoCommittee:
         if not prior_run_id:
             continuity = "NEW"
         decision_reason = manager.decision_reason
-        if manager.action == "ACCUMULATE":
+        if unconfirmed:
+            decision_reason = (
+                "ACCUMULATE was not repeated by the confirmation manager run; "
+                f"its {manager.action} stands. {decision_reason}"
+            )
+        if manager.action == "ACCUMULATE" or (
+            isinstance(manager, ManagerDecision)
+            and None not in (manager.entry, manager.stop, manager.target)
+        ):
             assert manager.entry is not None and manager.stop is not None
             assert manager.target is not None
             gross_rr = (manager.target - manager.entry) / (manager.entry - manager.stop)
@@ -832,18 +903,30 @@ class CryptoCommittee:
         valid_evidence_ids: tuple[str, ...],
         snapshot_mid: Decimal,
         position_quantity: Decimal = Decimal("0"),
+        atr14_1d: Decimal | None = None,
+        session_limits: tuple[Decimal | None, Decimal | None] = (None, None),
         calls: list[ModelCall],
     ) -> Any:
         last_error = "invalid structured output"
         for attempt in range(1, 3):
             requested_at = datetime.now(UTC).isoformat()
             try:
+                retry_prompt = (
+                    system_prompt
+                    if attempt == 1 or response_model is not ManagerDecision
+                    else system_prompt
+                    + "\nThe previous manager response failed validation. Return a corrected full JSON "
+                    "object. Use all three Spot levels or all null, keep an ACCUMULATE stop at "
+                    "least one atr14_1d below entry, cite only supplied evidence IDs, and omit "
+                    "R:R and entry/stop/target price claims from decision_reason; code computes "
+                    "and presents those levels."
+                )
                 raw = self.llm.generate(
                     stage=stage,
                     model=model,
                     thinking=thinking,
                     response_model=response_model,
-                    system_prompt=system_prompt,
+                    system_prompt=retry_prompt,
                     payload=payload,
                 )
                 if isinstance(raw, str):
@@ -857,7 +940,9 @@ class CryptoCommittee:
                     valid_evidence_ids,
                 )
                 if isinstance(parsed, (ManagerDecision, VNManagerDecision)):
-                    self._validate_manager(parsed, position_quantity, snapshot_mid)
+                    self._validate_manager(
+                        parsed, position_quantity, snapshot_mid, atr14_1d, session_limits
+                    )
                 calls.append(
                     ModelCall(
                         provider=self.provider,
@@ -919,12 +1004,26 @@ class CryptoCommittee:
         decision: ManagerDecision | VNManagerDecision,
         position_quantity: Decimal,
         snapshot_mid: Decimal,
+        atr14_1d: Decimal | None = None,
+        session_limits: tuple[Decimal | None, Decimal | None] = (None, None),
     ) -> None:
         if decision.action in {"REDUCE", "EXIT"} and position_quantity <= 0:
             raise ValueError(f"{decision.action} requires an existing position")
-        if decision.action not in {"ACCUMULATE", "REDUCE", "EXIT"}:
+        levels = (decision.entry, decision.stop, decision.target)
+        if isinstance(decision, ManagerDecision):
+            if RR_CLAIM.search(decision.decision_reason):
+                raise ValueError("decision_reason must omit R:R claims; levels determine gross R:R")
+            if SPOT_LEVEL_CLAIM.search(decision.decision_reason):
+                raise ValueError(
+                    "decision_reason must omit entry/stop/target price claims; levels are structured"
+                )
+            if any(level is not None for level in levels) and None in levels:
+                raise ValueError("Spot levels must be all present or all null")
+        if decision.action not in {"ACCUMULATE", "REDUCE", "EXIT"} and (
+            not isinstance(decision, ManagerDecision) or all(level is None for level in levels)
+        ):
             return
-        if None in (decision.entry, decision.stop, decision.target):
+        if None in levels:
             raise ValueError(f"{decision.action} requires entry, stop and target")
         assert decision.entry is not None
         assert decision.stop is not None
@@ -938,12 +1037,27 @@ class CryptoCommittee:
             raise ValueError(f"{decision.action} requires stop < entry < target")
         if abs(decision.entry - snapshot_mid) / snapshot_mid > MAX_ENTRY_DEVIATION:
             raise ValueError(f"entry price deviates more than 2% from {self.mid_label}")
+        floor, ceiling = session_limits
+        if decision.stop == floor or decision.target == ceiling:
+            raise ValueError(
+                "stop/target must not be the session floor/ceiling price; those are daily "
+                "price limits, not support or resistance"
+            )
         if decision.action == "ACCUMULATE":
             gross_rr = (decision.target - decision.entry) / (decision.entry - decision.stop)
             if gross_rr < MIN_GROSS_RISK_REWARD:
                 raise ValueError(
                     f"ACCUMULATE gross R:R {gross_rr:.2f} is below {MIN_GROSS_RISK_REWARD}"
                 )
+            # VN evidence carries no ATR; crypto without ATR fails closed.
+            if isinstance(decision, ManagerDecision):
+                if atr14_1d is None:
+                    raise ValueError("ACCUMULATE requires ATR14_1d to check stop distance")
+                if decision.entry - decision.stop < MIN_STOP_ATR_MULTIPLE * atr14_1d:
+                    raise ValueError(
+                        f"ACCUMULATE stop distance {decision.entry - decision.stop} is below "
+                        f"{MIN_STOP_ATR_MULTIPLE}x ATR14_1d {atr14_1d}"
+                    )
 
     @staticmethod
     def _base_payload(
@@ -987,6 +1101,22 @@ class CryptoCommittee:
                 "evidence_ids": [evidence.id],
             },
             (evidence.id,),
+        )
+
+    @staticmethod
+    def _atr14_1d(snapshot: EvidenceSnapshot) -> Decimal | None:
+        spot = next((item for item in snapshot.items if item.kind == "spot"), None)
+        indicators = (spot.payload.get("technical_indicators") if spot else None) or {}
+        value = indicators.get("atr14_1d")
+        return None if value is None else Decimal(str(value))
+
+    @staticmethod
+    def _session_limits(snapshot: Any) -> tuple[Decimal | None, Decimal | None]:
+        spot = next((item for item in snapshot.items if item.kind == "spot"), None)
+        payload = spot.payload if spot else {}
+        return tuple(  # type: ignore[return-value]
+            None if payload.get(key) is None else Decimal(str(payload[key]))
+            for key in ("floor_price", "ceiling_price")
         )
 
     @staticmethod

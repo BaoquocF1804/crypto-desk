@@ -80,6 +80,36 @@ class DerivativesIndicators(BaseModel):
     top_trader_ratio: Decimal | None = None
     taker_buy_sell_ratio: Decimal | None = None
 
+    @field_serializer(
+        "funding_rate",
+        "open_interest",
+        "oi_change_1h_pct",
+        "long_short_ratio",
+        "top_trader_ratio",
+        "taker_buy_sell_ratio",
+        when_used="json",
+    )
+    def serialize_decimal(self, value: Decimal | None) -> str | None:
+        return format(value, "f") if value is not None else None
+
+
+class TechnicalIndicators(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal["technical-v1"]
+    daily_as_of: str
+    four_hour_as_of: str
+    ema20_1d: Decimal | None = Field(ge=0)
+    ema50_1d: Decimal | None = Field(ge=0)
+    rsi14_4h: Decimal | None = Field(ge=0, le=100)
+    # Default None: evidence written before ATR existed must still render.
+    atr14_4h: Decimal | None = Field(default=None, ge=0)
+    atr14_1d: Decimal | None = Field(default=None, ge=0)
+
+    @field_serializer("ema20_1d", "ema50_1d", "rsi14_4h", "atr14_4h", "atr14_1d", when_used="json")
+    def serialize_decimal(self, value: Decimal | None) -> str | None:
+        return format(value, "f") if value is not None else None
+
 
 class DashboardMemberVote(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -113,6 +143,7 @@ class SymbolSection(BaseModel):
     latest_valid_decision: LatestValidDecision | None
     sparkline_closes: list[Decimal] = Field(default_factory=list)
     derivatives_indicators: DerivativesIndicators | None = None
+    technical_indicators: TechnicalIndicators | None = None
     committee_evaluation: DashboardCommitteeEvaluation | None = None
 
 
@@ -347,11 +378,13 @@ def _build_symbols(
             mark_usdt = priced.mark_usdt if priced else _evidence_mark_usdt(evidence)
             sparkline_closes = _evidence_sparkline_closes(evidence, limit=30)
             derivatives_indicators = _evidence_derivatives_indicators(evidence)
+            technical_indicators = _evidence_technical_indicators(evidence)
         else:
             change_24h_pct = None
             mark_usdt = priced.mark_usdt if priced else None
             sparkline_closes = []
             derivatives_indicators = None
+            technical_indicators = None
 
         results.append(
             SymbolSection(
@@ -363,6 +396,7 @@ def _build_symbols(
                 latest_valid_decision=latest_valid_decision,
                 sparkline_closes=sparkline_closes,
                 derivatives_indicators=derivatives_indicators,
+                technical_indicators=technical_indicators,
                 committee_evaluation=_build_committee_evaluation(latest_valid_row),
             )
         )
@@ -447,6 +481,21 @@ def _evidence_derivatives_indicators(
             taker_buy_sell_ratio=_dec("taker_buy_sell_ratio"),
         )
     except (ValueError, TypeError):
+        return None
+
+
+def _evidence_technical_indicators(
+    evidence: dict[str, object] | None,
+) -> TechnicalIndicators | None:
+    if not evidence:
+        return None
+    try:
+        items = evidence.get("items") or []
+        spot = next(item for item in items if item.get("kind") == "spot")
+        payload = spot.get("payload") or {}
+        raw = payload.get("technical_indicators")
+        return TechnicalIndicators.model_validate(raw) if raw else None
+    except (ValueError, TypeError, AttributeError, StopIteration):
         return None
 
 

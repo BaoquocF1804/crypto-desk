@@ -86,6 +86,25 @@ uv run desk --config config.yaml --json orders
 `sync` lấy balance/vị thế Spot. `screen` chỉ xếp hạng bốn cặp allowlist.
 `analyze` ghi snapshot, committee result, decision và báo cáo tiếng Việt vào
 `artifacts/crypto/`. Risk engine dùng `Decimal` và tạo ticket độc lập với LLM.
+Evidence kỹ thuật của crypto gồm EMA20/EMA50 từ nến ngày, RSI14 từ nến 4 giờ và
+ATR14 của cả hai khung, đều từ nến đã đóng, kèm thời điểm chốt riêng cho từng khung.
+EMA/ATR làm tròn theo tick size, RSI lấy hai chữ số thập phân. Thiếu lịch sử thì giá
+trị chỉ báo là `null`; các chỉ báo này phục vụ phân tích và không tự tạo tín hiệu giao
+dịch. ACCUMULATE chỉ hợp lệ khi stop cách entry ít nhất 1× ATR14 ngày (khớp horizon 20
+ngày của thesis); thiếu ATR thì bị chặn.
+Khi manager trả về `entry/stop/target`, hệ thống kiểm tra đủ ba mức và tự tính
+R:R gộp từ chính các mức đó cho mọi action. Nếu lời giải thích tự nêu R:R,
+đưa giá vào/dừng/đích ngoài các trường cấu trúc, hoặc các mức giá không hợp lệ,
+kết quả được yêu cầu sửa một lần rồi chặn nếu vẫn sai.
+ACCUMULATE chỉ được giữ khi một lần chạy manager thứ hai, cùng evidence, cũng ra
+ACCUMULATE; nếu không, quyết định của lần thứ hai được dùng. Prior thesis chỉ lấy
+từ lần chạy cũ hơn ít nhất 4 giờ. Tỷ lệ long/short đi kèm percentile trong khoảng
+20 ngày; committee đọc OI và taker flow gộp 24 giờ, còn số 1 giờ chỉ để hiển thị.
+
+`desk scorecard` chấm mỗi quyết định sau 20 ngày theo lợi nhuận so với giữ USDT
+(alpha so với BTCUSDT là cột phụ). Quyết định có entry/stop/target được chấm thêm
+theo mức nào chạm trước trên high/low nến ngày, quy ra bội số R. Các lần chạy trùng
+symbol/ngày/action chỉ tính một lần.
 
 Testnet execution chỉ được bật sau smoke test read-only:
 

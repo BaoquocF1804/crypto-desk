@@ -50,7 +50,7 @@ def test_fundamentals_is_the_only_optional_kind():
 NOW = datetime(2026, 9, 20, 0, 15, tzinfo=UTC)
 
 
-def make_vn_snapshot(symbol: str = "FPT") -> VNEvidenceSnapshot:
+def make_vn_snapshot(symbol: str = "FPT", **spot_fields: str) -> VNEvidenceSnapshot:
     items = tuple(
         EvidenceItem.create(
             kind=kind,
@@ -60,7 +60,7 @@ def make_vn_snapshot(symbol: str = "FPT") -> VNEvidenceSnapshot:
             as_of=NOW.isoformat(),
             delayed=False,
             stale=False,
-            payload={"symbol": symbol, "value": value},
+            payload={"symbol": symbol, "value": value, **(spot_fields if kind == "spot" else {})},
         )
         for kind, value in (
             ("spot", "100"),
@@ -480,7 +480,7 @@ def test_vn_accumulate_requires_raw_entry_and_minimum_gross_reward_risk():
     model, result = run("100", "90", "115")  # gross R:R = 1.5, inclusive boundary
     assert result.decision.action == "ACCUMULATE"
     assert "Computed gross R:R: (115 - 100) / (100 - 90) = 1.50" in result.decision.reason
-    assert model.manager_calls == 1
+    assert model.manager_calls == 2  # ACCUMULATE is confirmed by a second manager run
 
     model, result = run("100", "90", "114")  # gross R:R = 1.4
     assert result.decision.action == "NO_TRADE"
@@ -491,3 +491,53 @@ def test_vn_accumulate_requires_raw_entry_and_minimum_gross_reward_risk():
     assert result.decision.action == "NO_TRADE"
     assert "deviates" in result.decision.reason
     assert model.manager_calls == 2
+
+
+def test_vn_accumulate_levels_cannot_be_the_session_price_limits():
+    # MBB once used floor/ceiling as stop/target: those are the day's price limits
+    # around the reference price, not support or resistance.
+    from crypto_desk.committee import AnalystReport, CryptoCommittee, VNManagerDecision
+
+    def run(stop: str, target: str):
+        class _Model:
+            def generate(self, **kwargs):
+                ids = kwargs["payload"]["evidence_ids"]
+                if kwargs["response_model"] is AnalystReport:
+                    return {
+                        "stance": "neutral",
+                        "confidence": "4",
+                        "observations": ["Evidence is mixed"],
+                        "risks": [],
+                        "evidence_ids": ids,
+                    }
+                return {
+                    "action": "ACCUMULATE",
+                    "conviction": "7",
+                    "decision_reason": "Raw VND setup.",
+                    "bull_case": "Upside",
+                    "bear_case": "Downside",
+                    "catalysts": [],
+                    "invalidation": "Stop breached",
+                    "entry": "100",
+                    "stop": stop,
+                    "target": target,
+                    "evidence_ids": ids,
+                }
+
+        committee = CryptoCommittee(
+            _Model(),
+            specialists=VN_SPECIALISTS,
+            role_prompts=VN_ROLE_PROMPTS,
+            specialist_evidence=VN_SPECIALIST_EVIDENCE,
+            optional_kinds=VN_OPTIONAL_KINDS,
+            manager_model=VNManagerDecision,
+            mid_label="raw SSI mid",
+        )
+        snapshot = make_vn_snapshot(floor_price="90", ceiling_price="120")
+        return committee.run(snapshot).decision
+
+    assert run("91", "115").action == "ACCUMULATE"
+    stopped_at_floor = run("90", "115")
+    assert stopped_at_floor.action == "NO_TRADE"
+    assert "floor" in stopped_at_floor.reason
+    assert run("91", "120").action == "NO_TRADE"

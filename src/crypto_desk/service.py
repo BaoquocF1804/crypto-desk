@@ -26,6 +26,10 @@ from .risk import build_ticket, size_buy, size_sell
 from .screener import ScreenResult, screen
 from .store import Store
 
+# Calibration knob: a thesis younger than one closed 4H candle saw the same evidence, so
+# feeding it back as prior_thesis only makes the committee echo one random sample.
+PRIOR_THESIS_MIN_AGE = timedelta(hours=4)
+
 
 @dataclass(frozen=True, slots=True)
 class AnalysisRun:
@@ -139,9 +143,7 @@ class CryptoDeskService:
                 symbol, snapshot, effective_cutoff
             )
             committee = self._require_committee()
-            reflections = tuple(
-                render_reflection(item) for item in self.store.list_reflections(symbol)[:5]
-            )
+            reflections = prompt_reflections(self.store.list_reflections(symbol))
             try:
                 try:
                     committee_result = committee.run(
@@ -236,13 +238,24 @@ class CryptoDeskService:
         if self.store.scheduled_done("daily", bucket):
             return {"status": "ALREADY_DONE", "bucket": bucket}
 
-        cutoff = datetime.combine(target_date, time(0, 15), tzinfo=UTC)
-        reflection_run_ids = self.refresh_reflections(cutoff)
-        screen_results = self.screen(cutoff)
-        runs: list[str] = []
-        for result in screen_results:
-            if result.passes:
-                runs.append(self.analyze(result.symbol, cutoff).run_id)
+        if target_date < now.date():
+            reflection_run_ids = self.refresh_reflections(
+                datetime.combine(target_date, time(0, 15), tzinfo=UTC)
+            )
+            self.store.mark_scheduled("daily", bucket)
+            return {
+                "status": "REFLECTIONS_ONLY",
+                "bucket": bucket,
+                "screen": [],
+                "run_ids": [],
+                "reflection_run_ids": reflection_run_ids,
+            }
+
+        # Fetch current quotes/news at a live cutoff; historical buckets cannot
+        # reconstruct those sources and are handled above.
+        reflection_run_ids = self.refresh_reflections(now)
+        screen_results = self.screen()
+        runs = [self.analyze(result.symbol).run_id for result in screen_results if result.passes]
         self.store.mark_scheduled("daily", bucket)
         return {
             "status": "COMPLETED",
@@ -318,6 +331,9 @@ class CryptoDeskService:
         decision_action: str | None = None,
         decision_cutoff: str | None = None,
         benchmark_symbol: str | None = None,
+        highs: tuple[Decimal, ...] = (),
+        lows: tuple[Decimal, ...] = (),
+        levels: tuple[Decimal, Decimal, Decimal] | None = None,
     ) -> dict[str, Any]:
         if len(closes) < REFLECTION_HORIZON_DAYS:
             raise ValueError(
@@ -327,6 +343,9 @@ class CryptoDeskService:
             entry=entry,
             closes=closes,
             benchmark_closes=benchmark_closes,
+            highs=highs,
+            lows=lows,
+            levels=levels,
         )
         # ``created_at`` của hàng reflection là lúc job chấm điểm chạy, muộn hơn
         # ngày quyết định đúng một horizon. Ghi cutoff và horizon thật vào payload
@@ -371,18 +390,25 @@ class CryptoDeskService:
                     second=0,
                     microsecond=0,
                 )
-                closes = builder.reflection_closes(run["symbol"], start)
+                highs, lows, closes = zip(*builder.reflection_bars(run["symbol"], start))
                 benchmark = (
                     ()
                     if run["symbol"] == BENCHMARK_SYMBOL
-                    else builder.reflection_closes(BENCHMARK_SYMBOL, start)
+                    else tuple(bar[2] for bar in builder.reflection_bars(BENCHMARK_SYMBOL, start))
                 )
+                decision = run["decision"]
+                levels = tuple(decision.get(key) for key in ("entry", "stop", "target"))
                 self.save_reflection(
                     run_id=run["id"],
                     symbol=run["symbol"],
                     entry=entry,
                     closes=closes,
                     benchmark_closes=benchmark,
+                    highs=highs,
+                    lows=lows,
+                    levels=(
+                        None if None in levels else tuple(Decimal(str(level)) for level in levels)
+                    ),
                     decision_action=str(run["decision"]["action"]),
                     decision_cutoff=str(run["cutoff"]),
                     benchmark_symbol=BENCHMARK_SYMBOL,
@@ -665,7 +691,9 @@ class CryptoDeskService:
         snapshot: EvidenceSnapshot | None,
         cutoff: datetime,
     ) -> tuple[dict[str, Any] | None, str | None]:
-        prior_run = self.store.latest_valid_run(symbol, before_cutoff=iso(cutoff))
+        prior_run = self.store.latest_valid_run(
+            symbol, before_cutoff=iso(cutoff - PRIOR_THESIS_MIN_AGE)
+        )
         if not prior_run:
             return None, None
 
@@ -950,7 +978,28 @@ def render_reflection(item: dict[str, Any]) -> str:
     worst = payload.get("maximum_adverse_excursion")
     if worst is not None:
         parts.append(f"worst adverse excursion {format_pct(worst)}")
+    outcome = payload.get("barrier_outcome")
+    if outcome in {"target", "stop"}:
+        parts.append(f"setup hit {outcome} first ({Decimal(str(payload['r_multiple'])):+.2f}R)")
+    elif outcome == "open":
+        parts.append(f"setup hit neither level ({Decimal(str(payload['r_multiple'])):+.2f}R)")
     return " | ".join(parts)
+
+
+def prompt_reflections(rows: list[dict[str, Any]], limit: int = 5) -> tuple[str, ...]:
+    """Mỗi ngày quyết định một dòng, ngày gần nhất trước.
+
+    Một ngày chạy lại nhiều lần từng chiếm cả năm chỗ reflection của prompt với
+    cùng một kết quả, biến một quan sát thành năm.
+    """
+
+    def when(row: dict[str, Any]) -> str:
+        return str(row["payload"].get("decision_cutoff") or row["created_at"])
+
+    latest: dict[str, dict[str, Any]] = {}
+    for row in sorted(rows, key=when, reverse=True):
+        latest.setdefault(when(row)[:10], row)
+    return tuple(render_reflection(row) for row in list(latest.values())[:limit])
 
 
 def calculate_reflection(
@@ -958,10 +1007,12 @@ def calculate_reflection(
     entry: Decimal,
     closes: tuple[Decimal, ...],
     benchmark_closes: tuple[Decimal, ...],
-) -> dict[str, Decimal]:
+    highs: tuple[Decimal, ...] = (),
+    lows: tuple[Decimal, ...] = (),
+    levels: tuple[Decimal, Decimal, Decimal] | None = None,
+) -> dict[str, Any]:
     if entry <= 0 or not closes:
         raise ValueError("Reflection requires positive entry and closes")
-    returns = tuple(close / entry - Decimal("1") for close in closes)
     realized_return = closes[-1] / entry - Decimal("1")
     if benchmark_closes:
         if benchmark_closes[0] <= 0:
@@ -971,10 +1022,37 @@ def calculate_reflection(
     else:
         benchmark_return = Decimal("0")
         alpha = Decimal("0")
-    return {
+    result: dict[str, Any] = {
         "realized_return": realized_return,
-        "maximum_adverse_excursion": min(returns),
-        "maximum_favorable_excursion": max(returns),
+        "maximum_adverse_excursion": min(lows or closes) / entry - Decimal("1"),
+        "maximum_favorable_excursion": max(highs or closes) / entry - Decimal("1"),
         "benchmark_return": benchmark_return,
         "alpha": alpha,
     }
+    if levels and highs and lows and levels[1] < levels[0] < levels[2]:
+        result.update(_barrier_outcome(levels, highs, lows, closes[-1]))
+    return result
+
+
+def _barrier_outcome(
+    levels: tuple[Decimal, Decimal, Decimal],
+    highs: tuple[Decimal, ...],
+    lows: tuple[Decimal, ...],
+    last_close: Decimal,
+) -> dict[str, Any]:
+    """Setup đạt target hay chạm stop trước, tính theo bội số rủi ro (R).
+
+    Đây mới là thước đo của một quyết định có entry/stop/target: R:R chỉ là
+    hình dạng của cược, còn lợi thế nằm ở tỷ lệ chạm target trước.
+    """
+    # ponytail: giả định lệnh vào khớp đúng entry ngay phiên đầu; entry limit
+    # chưa bao giờ khớp vẫn được chấm như đã khớp.
+    entry, stop, target = levels
+    risk = entry - stop
+    for high, low in zip(highs, lows):
+        # Nến ngày không cho biết mức nào chạm trước, nên stop thắng khi chạm cả hai.
+        if low <= stop:
+            return {"barrier_outcome": "stop", "r_multiple": Decimal("-1")}
+        if high >= target:
+            return {"barrier_outcome": "target", "r_multiple": (target - entry) / risk}
+    return {"barrier_outcome": "open", "r_multiple": (last_close - entry) / risk}

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
@@ -240,3 +240,51 @@ def load_settings(path: Path) -> Settings:
     )
     _validate(settings)
     return settings
+
+
+def apply_model_preset(settings: Settings, preset: str | None) -> Settings:
+    """Return a new Settings instance with models overridden by preset, or original if None."""
+    if not preset:
+        return settings
+    normalized = preset.lower().strip()
+    if normalized in {"gemi-3.8", "gemini-3.8"}:
+        new_settings = replace(
+            settings,
+            models=replace(
+                settings.models,
+                provider="vertexai",
+                quick="gemini-3.8-flash",
+                deep="gemini-3.8-flash",
+                quick_thinking="low",
+                deep_thinking="high",
+            ),
+        )
+    elif normalized == "hybrid-deepseek":
+        new_settings = replace(
+            settings,
+            models=replace(
+                settings.models,
+                provider="deepseek",
+                quick="deepseek-v4-flash",
+                deep="deepseek-v4-pro",
+                quick_thinking="low",
+                deep_thinking="high",
+            ),
+        )
+    elif normalized in {"deepseek-pro", "deepseek_pro"}:
+        new_settings = replace(
+            settings,
+            models=replace(
+                settings.models,
+                provider="deepseek",
+                quick="deepseek-v4-pro",
+                deep="deepseek-v4-pro",
+                quick_thinking="high",
+                deep_thinking="high",
+            ),
+        )
+    else:
+        raise ValueError(f"Unknown model preset: {preset}")
+    _validate(new_settings)
+    return new_settings
+

@@ -49,10 +49,17 @@ def fetched(
     )
 
 
+def candle(close: int) -> list[str]:
+    """Binance open/high/low/close/volume strings with a 40 USDT high-low range."""
+    return [str(close), str(close + 20), str(close - 20), str(close), "0"]
+
+
 class FakePublicClient:
     def __init__(self):
-        daily_close = int((CUTOFF - timedelta(minutes=15)).timestamp() * 1000)
+        daily_close = int((CUTOFF - timedelta(minutes=15, milliseconds=1)).timestamp() * 1000)
         four_hour_close = daily_close
+        daily_last_open = daily_close - 86_400_000 + 1
+        four_hour_last_open = four_hour_close - 14_400_000 + 1
         self.exchange = fetched(
             {
                 "symbols": [
@@ -65,7 +72,7 @@ class FakePublicClient:
                         "ocoAllowed": True,
                         "otoAllowed": True,
                         "filters": [
-                            {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
+                            {"filterType": "PRICE_FILTER", "tickSize": "0.01000000"},
                             {
                                 "filterType": "LOT_SIZE",
                                 "stepSize": "0.00001",
@@ -79,14 +86,22 @@ class FakePublicClient:
         )
         self.daily = fetched(
             [
-                [0, "0", "0", "0", str(90_000 + index * 100), "0", daily_close]
+                [
+                    daily_last_open - (119 - index) * 86_400_000,
+                    *candle(90_000 + index * 100),
+                    daily_close - (119 - index) * 86_400_000,
+                ]
                 for index in range(120)
             ],
             as_of=CUTOFF - timedelta(minutes=15),
         )
         self.four_hour = fetched(
             [
-                [0, "0", "0", "0", str(98_000 + index * 10), "0", four_hour_close]
+                [
+                    four_hour_last_open - (179 - index) * 14_400_000,
+                    *candle(98_000 + index * 10),
+                    four_hour_close - (179 - index) * 14_400_000,
+                ]
                 for index in range(180)
             ],
             as_of=CUTOFF - timedelta(minutes=15),
@@ -175,6 +190,66 @@ def test_valid_snapshot_contains_all_evidence_kinds_and_symbol_rules():
     assert len(snapshot.evidence_ids) == 4
     spot = next(item for item in snapshot.items if item.kind == "spot")
     assert Decimal(spot.payload["change_24h_pct"]) == Decimal("2.5")
+    indicators = spot.payload["technical_indicators"]
+    assert indicators["version"] == "technical-v1"
+    assert Decimal(indicators["ema20_1d"]) > Decimal(indicators["ema50_1d"])
+    assert Decimal(indicators["rsi14_4h"]) == Decimal("100")
+    assert indicators["daily_as_of"] == "2026-07-16T23:59:59.999000+00:00"
+
+
+def test_technical_indicators_are_tick_rounded_and_include_atr():
+    snapshot = EvidenceBuilder(FakePublicClient(), {"BTCUSDT": "bitcoin"}).build("BTCUSDT", CUTOFF)
+
+    spot = next(item for item in snapshot.items if item.kind == "spot")
+    # Linear closes make EMA lag (period - 1) / 2 steps behind the last close 101900.
+    # True range is 40 on 4H bars (10 USDT steps) and 120 on daily bars (100 USDT steps).
+    assert spot.payload["technical_indicators"] == {
+        "version": "technical-v1",
+        "daily_as_of": "2026-07-16T23:59:59.999000+00:00",
+        "four_hour_as_of": "2026-07-16T23:59:59.999000+00:00",
+        "ema20_1d": "100950.00",
+        "ema50_1d": "99450.00",
+        "rsi14_4h": "100.00",
+        "atr14_4h": "40.00",
+        "atr14_1d": "120.00",
+    }
+
+
+def test_depth_summary_totals_the_supplied_book_levels():
+    # Models mis-add 20 book levels, then every later stage copies the wrong total.
+    client = FakePublicClient()
+    client.depth_result = fetched(
+        {
+            "bids": [["99990", "1.5"], ["99980", "0.25"]],
+            "asks": [["100010", "2"], ["100020", "0.125"]],
+        },
+        as_of=CUTOFF - timedelta(seconds=10),
+    )
+
+    snapshot = EvidenceBuilder(client, {"BTCUSDT": "bitcoin"}).build("BTCUSDT", CUTOFF)
+
+    spot = next(item for item in snapshot.items if item.kind == "spot")
+    assert spot.payload["depth_summary"] == {
+        "bid_levels": 2,
+        "ask_levels": 2,
+        "bid_qty": "1.75",
+        "ask_qty": "2.125",
+        "bid_notional_usdt": "174980.00",
+        "ask_notional_usdt": "212522.50",
+        "ask_to_bid_qty_ratio": "1.21",
+        # The visible book spans only 99980..100020 around a 100000 mid.
+        "price_band_pct": "0.0400",
+    }
+
+
+def test_close_outside_high_low_range_blocks_evidence():
+    client = FakePublicClient()
+    rows = [list(row) for row in client.four_hour.payload]
+    rows[-1][2] = str(Decimal(rows[-1][4]) - 1)
+    client.four_hour = replace(client.four_hour, payload=rows)
+
+    with pytest.raises(EvidenceError, match="Invalid or missing 4h candle"):
+        EvidenceBuilder(client, {"BTCUSDT": "bitcoin"}).build("BTCUSDT", CUTOFF)
 
 
 def test_snapshot_is_reused_for_the_same_cutoff():
@@ -232,6 +307,49 @@ def test_open_trailing_candles_are_dropped_before_time_leakage_check():
 
     assert len(snapshot.daily_closes) == 120
     assert snapshot.daily_closes[-1] != Decimal("999999")
+    spot = next(item for item in snapshot.items if item.kind == "spot")
+    baseline = EvidenceBuilder(FakePublicClient(), {"BTCUSDT": "bitcoin"}).build(
+        "BTCUSDT", CUTOFF
+    )
+    baseline_spot = next(item for item in baseline.items if item.kind == "spot")
+    assert spot.payload["technical_indicators"] == baseline_spot.payload["technical_indicators"]
+
+
+def test_missing_four_hour_candle_blocks_indicator_evidence():
+    client = FakePublicClient()
+    client.four_hour = replace(
+        client.four_hour,
+        payload=[*client.four_hour.payload[:100], *client.four_hour.payload[101:]],
+    )
+
+    with pytest.raises(EvidenceError, match="missing 4h candle"):
+        EvidenceBuilder(client, {"BTCUSDT": "bitcoin"}).build("BTCUSDT", CUTOFF)
+
+
+def test_short_four_hour_history_has_unavailable_rsi():
+    client = FakePublicClient()
+    client.four_hour = replace(client.four_hour, payload=client.four_hour.payload[-14:])
+
+    snapshot = EvidenceBuilder(client, {"BTCUSDT": "bitcoin"}).build("BTCUSDT", CUTOFF)
+
+    spot = next(item for item in snapshot.items if item.kind == "spot")
+    assert spot.payload["technical_indicators"]["rsi14_4h"] is None
+
+
+def test_extra_older_closed_candle_does_not_change_indicators():
+    client = FakePublicClient()
+    baseline = EvidenceBuilder(client, {"BTCUSDT": "bitcoin"}).build("BTCUSDT", CUTOFF)
+    interval_ms = 86_400_000
+    first = client.daily.payload[0]
+    older = [first[0] - interval_ms, *first[1:6], first[6] - interval_ms]
+    client.daily = replace(client.daily, payload=[older, *client.daily.payload])
+
+    snapshot = EvidenceBuilder(client, {"BTCUSDT": "bitcoin"}).build("BTCUSDT", CUTOFF)
+
+    assert snapshot.daily_closes == baseline.daily_closes
+    spot = next(item for item in snapshot.items if item.kind == "spot")
+    baseline_spot = next(item for item in baseline.items if item.kind == "spot")
+    assert spot.payload["technical_indicators"] == baseline_spot.payload["technical_indicators"]
 
 
 def test_missing_open_interest_blocks_evidence():
@@ -489,6 +607,18 @@ def test_rate_limit_honors_retry_after(monkeypatch):
 
 
 def test_evidence_builder_collects_extended_futures_metrics():
+    requested: dict[str, int] = {}
+
+    def hourly(values, key, **extra):
+        return [
+            {
+                key: value,
+                "timestamp": int((CUTOFF - timedelta(hours=len(values) - 1 - index)).timestamp() * 1000),
+                **{name: column[index] for name, column in extra.items()},
+            }
+            for index, value in enumerate(values)
+        ]
+
     class ExtendedFakeClient(FakePublicClient):
         def funding_history(self, symbol: str, limit: int = 3) -> Fetched:
             return fetched(
@@ -507,17 +637,9 @@ def test_evidence_builder_collects_extended_futures_metrics():
             )
 
         def open_interest_hist(self, symbol: str, period: str = "1h", limit: int = 2) -> Fetched:
+            requested["open_interest_hist"] = limit
             return fetched(
-                [
-                    {
-                        "sumOpenInterest": "100000",
-                        "timestamp": int((CUTOFF - timedelta(hours=1)).timestamp() * 1000),
-                    },
-                    {
-                        "sumOpenInterest": "105000",
-                        "timestamp": int(CUTOFF.timestamp() * 1000),
-                    },
-                ],
+                hourly(["80000"] + ["100000"] * (limit - 2) + ["105000"], "sumOpenInterest"),
                 provider="binance-usdm",
                 source="https://fapi.binance.com/futures/data/openInterestHist",
             )
@@ -525,15 +647,17 @@ def test_evidence_builder_collects_extended_futures_metrics():
         def global_long_short_ratio(
             self, symbol: str, period: str = "1h", limit: int = 1
         ) -> Fetched:
+            requested["global_long_short_ratio"] = limit
             return fetched(
-                [{"longShortRatio": "1.85", "timestamp": int(CUTOFF.timestamp() * 1000)}],
+                hourly(["1.2", "1.5", "2.0", "1.85"], "longShortRatio"),
                 provider="binance-usdm",
                 source="https://fapi.binance.com/futures/data/globalLongShortAccountRatio",
             )
 
         def top_long_short_ratio(self, symbol: str, period: str = "1h", limit: int = 1) -> Fetched:
+            requested["top_long_short_ratio"] = limit
             return fetched(
-                [{"longShortRatio": "1.25", "timestamp": int(CUTOFF.timestamp() * 1000)}],
+                hourly(["1.0", "1.25"], "longShortRatio"),
                 provider="binance-usdm",
                 source="https://fapi.binance.com/futures/data/topLongShortPositionRatio",
             )
@@ -541,8 +665,14 @@ def test_evidence_builder_collects_extended_futures_metrics():
         def taker_long_short_ratio(
             self, symbol: str, period: str = "1h", limit: int = 1
         ) -> Fetched:
+            requested["taker_long_short_ratio"] = limit
             return fetched(
-                [{"buySellRatio": "1.15", "timestamp": int(CUTOFF.timestamp() * 1000)}],
+                hourly(
+                    ["0.8", "1.15"],
+                    "buySellRatio",
+                    buyVol=["80", "115"],
+                    sellVol=["100", "100"],
+                ),
                 provider="binance-usdm",
                 source="https://fapi.binance.com/futures/data/takerlongshortRatio",
             )
@@ -557,9 +687,22 @@ def test_evidence_builder_collects_extended_futures_metrics():
     assert snapshot.taker_buy_sell_ratio == Decimal("1.15")
 
     derivatives_item = next(item for item in snapshot.items if item.kind == "derivatives")
-    assert derivatives_item.payload["funding_rate_trend"] == "rising"
-    assert Decimal(str(derivatives_item.payload["oi_change_1h_pct"])) == Decimal("5")
-    assert Decimal(str(derivatives_item.payload["long_short_ratio"])) == Decimal("1.85")
+    payload = derivatives_item.payload
+    assert payload["funding_rate_trend"] == "rising"
+    assert Decimal(str(payload["oi_change_1h_pct"])) == Decimal("5")
+    assert Decimal(str(payload["long_short_ratio"])) == Decimal("1.85")
+    # Hour-scale readings are noise for a 20-day thesis; the committee reads these instead.
+    assert Decimal(str(payload["oi_change_24h_pct"])) == Decimal("31.25")
+    assert Decimal(str(payload["taker_buy_sell_ratio_24h"])) == Decimal("0.975")
+    # Ratio levels are structural per symbol, so they come with their own 20-day baseline.
+    assert Decimal(str(payload["long_short_ratio_pctile_20d"])) == Decimal("75")
+    assert Decimal(str(payload["top_trader_ratio_pctile_20d"])) == Decimal("100")
+    assert requested == {
+        "open_interest_hist": 25,
+        "global_long_short_ratio": 500,
+        "top_long_short_ratio": 500,
+        "taker_long_short_ratio": 24,
+    }
 
 
 def test_news_relevance_marks_symbol_matches_and_keeps_market_items():
@@ -616,3 +759,27 @@ def test_evidence_builder_attaches_tagged_news_and_count():
     assert news_item.payload["symbol_news_count"] == 1
     assert [item["relevance"] for item in news_item.payload["items"]] == ["symbol", "market"]
 
+
+def test_reflection_bars_return_high_low_close_per_completed_day():
+    class _Client:
+        def klines(self, symbol, interval, limit, *, start_time=None, end_time=None):
+            rows = [[0, "1", str(105 + day), str(95 + day), str(100 + day), 0, 0] for day in range(limit)]
+            return fetched(rows)
+
+    bars = EvidenceBuilder(_Client(), {}).reflection_bars("BTCUSDT", CUTOFF, periods=2)
+
+    assert bars == (
+        (Decimal("105"), Decimal("95"), Decimal("100")),
+        (Decimal("106"), Decimal("96"), Decimal("101")),
+    )
+
+
+def test_ether_headlines_count_as_eth_news():
+    from crypto_desk.data import news_aliases
+
+    tagged = tag_news_relevance(
+        [{"title": "Ether ETF inflows turn positive"}, {"title": "Etherscan adds a feature"}],
+        news_aliases("ETH", "ethereum"),
+    )
+
+    assert [item["relevance"] for item in tagged] == ["symbol", "market"]

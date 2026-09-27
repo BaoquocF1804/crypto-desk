@@ -7,19 +7,22 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable
 
 import httpx
 
 from .domain import EvidenceItem, SymbolRules, iso, to_jsonable, utcnow
+from .indicators import atr, ema, rsi
 
 
 SPOT_PUBLIC = "https://api.binance.com"
 FUTURES_PUBLIC = "https://fapi.binance.com"
 COINGECKO_PUBLIC = "https://api.coingecko.com/api/v3"
 NEWS_CACHE_SECONDS = 300
+# Headline names that neither the ticker nor the CoinGecko id match.
+EXTRA_NEWS_ALIASES = {"ETH": ("Ether",)}
 
 
 class EvidenceError(ValueError):
@@ -68,6 +71,52 @@ class EvidenceSnapshot:
 
 def _utc_from_ms(value: int | str) -> datetime:
     return datetime.fromtimestamp(int(value) / 1000, tz=UTC)
+
+
+def _high_low_close(rows: list[Any]) -> tuple[tuple[Decimal, ...], ...]:
+    return tuple(tuple(Decimal(str(row[index])) for row in rows) for index in (2, 3, 4))
+
+
+def _rounded(value: Decimal | None, quantum: Decimal) -> Decimal | None:
+    return None if value is None else value.quantize(quantum)
+
+
+def _depth_summary(depth: dict[str, Any]) -> dict[str, Any]:
+    """Book totals computed here: models mis-add 20 levels and later stages copy the error."""
+    bids = [(Decimal(str(price)), Decimal(str(qty))) for price, qty in depth.get("bids", [])]
+    asks = [(Decimal(str(price)), Decimal(str(qty))) for price, qty in depth.get("asks", [])]
+    bid_qty = sum((qty for _, qty in bids), Decimal("0"))
+    ask_qty = sum((qty for _, qty in asks), Decimal("0"))
+    cent = Decimal("0.01")
+    return {
+        "bid_levels": len(bids),
+        "ask_levels": len(asks),
+        "bid_qty": bid_qty,
+        "ask_qty": ask_qty,
+        "bid_notional_usdt": sum((p * q for p, q in bids), Decimal("0")).quantize(cent),
+        "ask_notional_usdt": sum((p * q for p, q in asks), Decimal("0")).quantize(cent),
+        "ask_to_bid_qty_ratio": (ask_qty / bid_qty).quantize(cent) if bid_qty else None,
+        # Top 20 levels span ~0.01% of price on BTC; models called that book "thin".
+        "price_band_pct": (
+            ((asks[-1][0] - bids[-1][0]) / ((asks[0][0] + bids[0][0]) / 2) * 100).quantize(
+                Decimal("0.0001")
+            )
+            if bids and asks
+            else None
+        ),
+    }
+
+
+def _pct_change(previous: Decimal, current: Decimal) -> Decimal | None:
+    return (current - previous) / previous * Decimal("100") if previous > 0 else None
+
+
+def _percentile_rank(values: list[Decimal]) -> Decimal:
+    """Share of the window at or below the latest value, 0-100."""
+    latest = values[-1]
+    return (Decimal(sum(1 for value in values if value <= latest)) * 100 / len(values)).quantize(
+        Decimal("1")
+    )
 
 
 def _aware(value: datetime) -> datetime:
@@ -340,6 +389,10 @@ def _parse_feed(text: str) -> list[dict[str, str]]:
     return result
 
 
+def news_aliases(base_asset: str, coingecko_id: str) -> tuple[str, ...]:
+    return (base_asset, coingecko_id, *EXTRA_NEWS_ALIASES.get(base_asset, ()))
+
+
 def tag_news_relevance(
     items: list[dict[str, str]],
     aliases: tuple[str, ...],
@@ -478,8 +531,21 @@ class EvidenceBuilder:
         if not recent_news:
             raise EvidenceError("No current news evidence in the previous 48 hours")
 
-        daily_closes = tuple(Decimal(str(row[4])) for row in daily.payload)
-        four_hour_closes = tuple(Decimal(str(row[4])) for row in four_hour.payload)
+        daily_hlc = _high_low_close(daily.payload)
+        four_hour_hlc = _high_low_close(four_hour.payload)
+        daily_closes, four_hour_closes = daily_hlc[2], four_hour_hlc[2]
+        # normalize(): Binance sends tickSize "0.01000000"; quantizing to that keeps 8 digits.
+        tick = rules.tick_size.normalize()
+        technical_indicators = {
+            "version": "technical-v1",
+            "daily_as_of": iso(daily.as_of),
+            "four_hour_as_of": iso(four_hour.as_of),
+            "ema20_1d": _rounded(ema(daily_closes, 20), tick),
+            "ema50_1d": _rounded(ema(daily_closes, 50), tick),
+            "rsi14_4h": _rounded(rsi(four_hour_closes, 14), Decimal("0.01")),
+            "atr14_4h": _rounded(atr(*four_hour_hlc, 14), tick),
+            "atr14_1d": _rounded(atr(*daily_hlc, 14), tick),
+        }
         funding_rate = Decimal(str(funding.payload["lastFundingRate"]))
         open_interest_value = Decimal(str(open_interest.payload["openInterest"]))
         quote_volume = Decimal(str(ticker.payload["quoteVolume"]))
@@ -493,7 +559,9 @@ class EvidenceBuilder:
             "change_24h_pct": change_24h_pct,
             "daily_closes": daily_closes,
             "four_hour_closes": four_hour_closes,
+            "technical_indicators": technical_indicators,
             "depth": depth.payload,
+            "depth_summary": _depth_summary(depth.payload),
             "rules": asdict(rules),
         }
         long_short_ratio: Decimal | None = None
@@ -518,38 +586,53 @@ class EvidenceBuilder:
         except Exception:
             pass
 
+        # The 1h readings stay for the dashboard. The committee judges a 20-day thesis, so it
+        # gets 24h aggregates and each ratio's rank within its own last ~20 days: account
+        # long/short sits near 2.5 on ETH every day, and read raw it looked "crowded" daily.
+        oi_change_24h_pct: Decimal | None = None
+        taker_buy_sell_ratio_24h: Decimal | None = None
+        long_short_ratio_pctile: Decimal | None = None
+        top_trader_ratio_pctile: Decimal | None = None
         try:
             if hasattr(self.client, "open_interest_hist"):
-                oih = self.client.open_interest_hist(symbol, period="1h", limit=2)
+                oih = self.client.open_interest_hist(symbol, period="1h", limit=25)
                 if oih and oih.payload and len(oih.payload) >= 2:
-                    oi_prev = Decimal(str(oih.payload[0]["sumOpenInterest"]))
-                    oi_curr = Decimal(str(oih.payload[-1]["sumOpenInterest"]))
-                    if oi_prev > 0:
-                        oi_change_1h_pct = ((oi_curr - oi_prev) / oi_prev) * Decimal("100")
+                    values = [Decimal(str(row["sumOpenInterest"])) for row in oih.payload]
+                    oi_change_1h_pct = _pct_change(values[-2], values[-1])
+                    if len(values) == 25:
+                        oi_change_24h_pct = _pct_change(values[0], values[-1])
         except Exception:
             pass
 
         try:
             if hasattr(self.client, "global_long_short_ratio"):
-                glsr = self.client.global_long_short_ratio(symbol, period="1h", limit=1)
+                glsr = self.client.global_long_short_ratio(symbol, period="1h", limit=500)
                 if glsr and glsr.payload:
-                    long_short_ratio = Decimal(str(glsr.payload[-1]["longShortRatio"]))
+                    values = [Decimal(str(row["longShortRatio"])) for row in glsr.payload]
+                    long_short_ratio = values[-1]
+                    long_short_ratio_pctile = _percentile_rank(values)
         except Exception:
             pass
 
         try:
             if hasattr(self.client, "top_long_short_ratio"):
-                tlsr = self.client.top_long_short_ratio(symbol, period="1h", limit=1)
+                tlsr = self.client.top_long_short_ratio(symbol, period="1h", limit=500)
                 if tlsr and tlsr.payload:
-                    top_trader_ratio = Decimal(str(tlsr.payload[-1]["longShortRatio"]))
+                    values = [Decimal(str(row["longShortRatio"])) for row in tlsr.payload]
+                    top_trader_ratio = values[-1]
+                    top_trader_ratio_pctile = _percentile_rank(values)
         except Exception:
             pass
 
         try:
             if hasattr(self.client, "taker_long_short_ratio"):
-                tklsr = self.client.taker_long_short_ratio(symbol, period="1h", limit=1)
+                tklsr = self.client.taker_long_short_ratio(symbol, period="1h", limit=24)
                 if tklsr and tklsr.payload:
                     taker_buy_sell_ratio = Decimal(str(tklsr.payload[-1]["buySellRatio"]))
+                    sold = sum(Decimal(str(row["sellVol"])) for row in tklsr.payload)
+                    if sold > 0:
+                        bought = sum(Decimal(str(row["buyVol"])) for row in tklsr.payload)
+                        taker_buy_sell_ratio_24h = (bought / sold).quantize(Decimal("0.0001"))
         except Exception:
             pass
 
@@ -562,6 +645,10 @@ class EvidenceBuilder:
             "long_short_ratio": long_short_ratio,
             "top_trader_ratio": top_trader_ratio,
             "taker_buy_sell_ratio": taker_buy_sell_ratio,
+            "oi_change_24h_pct": oi_change_24h_pct,
+            "taker_buy_sell_ratio_24h": taker_buy_sell_ratio_24h,
+            "long_short_ratio_pctile_20d": long_short_ratio_pctile,
+            "top_trader_ratio_pctile_20d": top_trader_ratio_pctile,
         }
         reference_payload = {
             "symbol": symbol,
@@ -572,7 +659,7 @@ class EvidenceBuilder:
         }
         tagged_news = tag_news_relevance(
             recent_news,
-            (rules.base_asset, self.coingecko_ids[symbol]),
+            news_aliases(rules.base_asset, self.coingecko_ids[symbol]),
         )
         news_payload = {
             "symbol": symbol,
@@ -610,12 +697,13 @@ class EvidenceBuilder:
         self._cache[cache_key] = snapshot
         return snapshot
 
-    def reflection_closes(
+    def reflection_bars(
         self,
         symbol: str,
         start: datetime,
         periods: int = 20,
-    ) -> tuple[Decimal, ...]:
+    ) -> tuple[tuple[Decimal, Decimal, Decimal], ...]:
+        """(high, low, close) mỗi ngày: high/low để biết stop hay target chạm trước."""
         end = _aware(start) + timedelta(days=periods)
         fetched = self.client.klines(
             symbol,
@@ -626,7 +714,9 @@ class EvidenceBuilder:
         )
         if len(fetched.payload) != periods:
             raise EvidenceError(f"Reflection for {symbol} needs {periods} completed daily candles")
-        return tuple(Decimal(str(row[4])) for row in fetched.payload)
+        return tuple(
+            tuple(Decimal(str(row[index])) for index in (2, 3, 4)) for row in fetched.payload
+        )
 
     @staticmethod
     def _closed_klines(
@@ -634,9 +724,32 @@ class EvidenceBuilder:
         cutoff: datetime,
         label: str,
     ) -> Fetched:
-        rows = [row for row in fetched.payload if _utc_from_ms(row[6]) <= cutoff]
+        try:
+            rows = [row for row in fetched.payload if _utc_from_ms(row[6]) <= cutoff]
+        except (IndexError, TypeError, ValueError, InvalidOperation) as exc:
+            raise EvidenceError(f"Invalid {label} candle") from exc
         if not rows:
             raise EvidenceError(f"No closed {label} candles at cutoff")
+        # The request includes room for a still-open candle. Keep a fixed
+        # history length when the exchange happens to return only closed rows.
+        rows = rows[-(120 if label == "daily" else 180):]
+        interval_ms = 86_400_000 if label == "daily" else 14_400_000
+        previous_open: int | None = None
+        for row in rows:
+            try:
+                opened = int(row[0])
+                closed = int(row[6])
+                high, low, close = (Decimal(str(row[index])) for index in (2, 3, 4))
+            except (IndexError, TypeError, ValueError, InvalidOperation) as exc:
+                raise EvidenceError(f"Invalid {label} candle") from exc
+            if (
+                closed - opened != interval_ms - 1
+                or (previous_open is not None and opened - previous_open != interval_ms)
+                or not all(value.is_finite() for value in (high, low, close))
+                or not 0 < low <= close <= high
+            ):
+                raise EvidenceError(f"Invalid or missing {label} candle")
+            previous_open = opened
         return Fetched(
             provider=fetched.provider,
             source=fetched.source,

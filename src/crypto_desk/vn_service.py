@@ -15,7 +15,12 @@ from pydantic import BaseModel
 from .config import REFLECTION_HORIZON_DAYS, VN_BENCHMARK_SYMBOL, Settings
 from .data import EvidenceError, _aware
 from .domain import ResearchDecision, is_decided, iso, to_jsonable, utcnow
-from .service import AnalysisRun, calculate_reflection, render_reflection
+from .service import (
+    PRIOR_THESIS_MIN_AGE,
+    AnalysisRun,
+    calculate_reflection,
+    prompt_reflections,
+)
 from .store import Store
 from .vn_data import SSIClient, VNEvidenceBuilder, VNEvidenceSnapshot
 from .vn_fundamentals import load_fundamentals
@@ -101,9 +106,7 @@ class VNDeskService:
         else:
             evidence_payload = snapshot
             committee = self._require_committee()
-            reflections = tuple(
-                render_reflection(item) for item in self.store.list_reflections(symbol)[:5]
-            )
+            reflections = prompt_reflections(self.store.list_reflections(symbol))
             prior_thesis, prior_run_id = self._build_prior_thesis(
                 symbol, snapshot, effective_cutoff
             )
@@ -344,7 +347,9 @@ class VNDeskService:
         snapshot: VNEvidenceSnapshot | None,
         cutoff: datetime,
     ) -> tuple[dict[str, Any] | None, str | None]:
-        prior_run = self.store.latest_valid_run(symbol, before_cutoff=iso(cutoff))
+        prior_run = self.store.latest_valid_run(
+            symbol, before_cutoff=iso(cutoff - PRIOR_THESIS_MIN_AGE)
+        )
         if not prior_run:
             return None, None
 

@@ -34,7 +34,7 @@ from .commands import (
     parse_args,
     ticket_fingerprint,
 )
-from .config import Settings
+from .config import Settings, apply_model_preset
 from .domain import utcnow
 from .store import Store
 
@@ -81,7 +81,8 @@ class CommandDispatcher:
             return self._service_factory(**kwargs)
         from .cli import _service
 
-        return _service(self.settings, **kwargs)
+        settings = kwargs.pop("settings", self.settings)
+        return _service(settings, **kwargs)
 
     def _execution(self) -> Any:
         if self._execution_factory is not None:
@@ -195,12 +196,16 @@ class CommandDispatcher:
         operator_email: str,
     ) -> SafeAnalyzeResult:
         del operator_email
-        if args.symbol in getattr(self.settings, "vn_symbols", ()):
+        try:
+            effective_settings = apply_model_preset(self.settings, args.model_preset)
+        except ValueError as exc:
+            raise DispatchError("VALIDATION_FAILED", str(exc)) from None
+        if args.symbol in getattr(effective_settings, "vn_symbols", ()):
             from .cli import _vn_service
 
-            run = _vn_service(self.settings).analyze(args.symbol)
-        elif args.symbol in self.settings.symbols:
-            run = self._service(broker=True).analyze(args.symbol)
+            run = _vn_service(effective_settings).analyze(args.symbol)
+        elif args.symbol in effective_settings.symbols:
+            run = self._service(broker=True, settings=effective_settings).analyze(args.symbol)
         else:
             raise DispatchError(
                 "VALIDATION_FAILED",

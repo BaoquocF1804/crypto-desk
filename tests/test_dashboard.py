@@ -232,7 +232,18 @@ def test_symbol_24h_change_comes_from_latest_valid_evidence(tmp_path: Path):
                 "items": [
                     {
                         "kind": "spot",
-                        "payload": {"change_24h_pct": "2.5"},
+                        "payload": {
+                            "change_24h_pct": "2.5",
+                            "technical_indicators": {
+                                "version": "technical-v1",
+                                "daily_as_of": "2026-07-16T23:59:59.999000+00:00",
+                                "four_hour_as_of": "2026-07-18T03:59:59.999000+00:00",
+                                "ema20_1d": "95000",
+                                "ema50_1d": "9.75E+4",
+                                "rsi14_4h": "62.5",
+                                "atr14_4h": "1250.50",
+                            },
+                        },
                     }
                 ]
             }
@@ -250,6 +261,11 @@ def test_symbol_24h_change_comes_from_latest_valid_evidence(tmp_path: Path):
 
     btc = next(item for item in snapshot.symbols if item.symbol == "BTCUSDT")
     assert btc.change_24h_pct == Decimal("2.5")
+    assert btc.technical_indicators is not None
+    assert btc.technical_indicators.ema20_1d == Decimal("95000")
+    assert btc.model_dump(mode="json")["technical_indicators"]["ema50_1d"] == "97500"
+    assert btc.model_dump(mode="json")["technical_indicators"]["atr14_4h"] == "1250.50"
+    assert btc.technical_indicators.atr14_1d is None
 
 
 def test_legitimate_no_trade_with_evidence_is_valid_research(tmp_path: Path):

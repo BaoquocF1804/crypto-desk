@@ -406,13 +406,13 @@ def test_runner_heartbeat_stops_renewing_lease_after_max_command_duration(tmp_pa
     runner._active_command_started_at = 100.0
     runner._last_lease_renew = 100.0
 
-    # Mock time so that monotonic is now 1000.0 (> 600s after start)
+    # Mock time so that monotonic is now 2500.0 (> 1800s after start)
     logs = []
     runner._log = logs.append
     import time
     orig_monotonic = time.monotonic
     try:
-        time.monotonic = lambda: 1000.0
+        time.monotonic = lambda: 2500.0
         # Run one iteration of heartbeat logic
         runner.heartbeat()
         now = time.monotonic()

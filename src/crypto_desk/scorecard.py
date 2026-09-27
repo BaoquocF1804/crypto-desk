@@ -3,18 +3,24 @@
 Đây không phải backtest lịch sử. Evidence của một lần chạy (sổ lệnh, độ sâu,
 RSS news, funding) chỉ tồn tại tại thời điểm chạy và không dựng lại được cho
 quá khứ, nên không thể chạy lại committee trên một ngày đã qua. Thay vào đó
-mỗi quyết định đã chốt được chấm sau ``REFLECTION_HORIZON_DAYS`` ngày bằng
-alpha so với ``BENCHMARK_SYMBOL``, rồi gộp theo action để trả lời đúng một câu
-hỏi: khi desk nói ACCUMULATE, alpha thực tế là bao nhiêu.
+mỗi quyết định đã chốt được chấm sau ``REFLECTION_HORIZON_DAYS`` ngày rồi gộp
+theo action để trả lời đúng một câu hỏi: khi desk nói ACCUMULATE, kết quả thực
+tế là bao nhiêu.
 
-``BENCHMARK_SYMBOL`` bị loại khỏi thống kê vì alpha của nó luôn bằng 0 theo
-cấu tạo; giữ lại sẽ kéo mọi trung bình về 0.
+Desk long-only, phương án thay thế của mọi quyết định là giữ USDT, nên "đúng
+hướng" đo bằng lợi nhuận tuyệt đối (``close/entry - 1``): ACCUMULATE/HOLD đúng
+khi lợi nhuận dương, REDUCE/EXIT/NO_TRADE đúng khi tài sản giảm sau khi desk
+đứng ngoài. Alpha so với benchmark chỉ là cột phụ; chính benchmark bị loại khỏi
+trung bình alpha vì alpha của nó luôn bằng 0 theo cấu tạo, nhưng vẫn được chấm
+theo lợi nhuận.
 
-Alpha luôn được đo theo chiều long (``close/entry - 1`` trừ benchmark), không
-đảo dấu theo action. Vì vậy "đúng hướng" phải phụ thuộc vào action: desk giữ
-hàng (ACCUMULATE/HOLD) đúng khi alpha dương, còn desk đứng ngoài hoặc cắt
-(REDUCE/EXIT/NO_TRADE) đúng khi alpha âm — tài sản kém benchmark sau khi desk
-rời đi.
+Quyết định có entry/stop/target được chấm thêm theo mức nào chạm trước (xem
+``service._barrier_outcome``): R:R chỉ là hình dạng của cược, còn lợi thế nằm
+ở tỷ lệ chạm target trước, gộp lại thành kỳ vọng theo bội số rủi ro (R).
+
+Nhiều lần chạy cùng symbol, cùng ngày, cùng action là cùng một quyết định bị
+lấy mẫu lại; chỉ lần muộn nhất được tính để một ngày chạy 40 lần không át các
+ngày khác.
 """
 
 from __future__ import annotations
@@ -35,11 +41,13 @@ QUANTUM = Decimal("0.0001")
 class ActionScore:
     action: str
     samples: int
-    distinct_days: int
-    mean_alpha: Decimal
-    median_alpha: Decimal
+    mean_return: Decimal
+    mean_alpha: Decimal | None
     correct_direction_rate: Decimal
     mean_worst_excursion: Decimal
+    resolved: int
+    target_first_rate: Decimal | None
+    mean_r_multiple: Decimal | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,19 +62,19 @@ class Scorecard:
     horizon_days: int
     benchmark: str
     scored: int
+    collapsed: int
     skipped_no_action: int
     skipped_unknown_action: int
-    skipped_benchmark: int
     groups: tuple[BenchmarkGroup, ...]
 
     def render(self) -> str:
         lines = [
             f"Điểm số committee — cửa sổ {self.horizon_days} ngày, "
-            f"alpha so với {self.benchmark}",
+            f"so với giữ USDT (alpha phụ so với {self.benchmark})",
             f"Đã chấm {self.scored} quyết định "
-            f"(bỏ qua {self.skipped_no_action} thiếu action, "
-            f"{self.skipped_unknown_action} action lạ, "
-            f"{self.skipped_benchmark} thuộc chính benchmark).",
+            f"(gộp {self.collapsed} lần chạy trùng symbol/ngày/action, "
+            f"bỏ qua {self.skipped_no_action} thiếu action, "
+            f"{self.skipped_unknown_action} action lạ).",
         ]
         if not self.groups:
             lines.append("Chưa đủ dữ liệu để chấm.")
@@ -79,26 +87,39 @@ class Scorecard:
                     "  Benchmark của nhóm này được suy ra từ symbol, không đọc từ dữ liệu."
                 )
             lines.append(
-                f"{'Action':<12}{'N':>4}{'Ngày':>6}{'Alpha TB':>11}{'Alpha TV':>11}"
-                f"{'Đúng hướng':>12}{'Tệ nhất':>11}"
+                f"{'Action':<12}{'N':>4}{'LN TB':>10}{'Alpha TB':>10}"
+                f"{'Đúng hướng':>12}{'Tệ nhất':>10}{'TP trước':>12}{'Kỳ vọng':>10}"
             )
             for score in group.scores:
+                target_first = (
+                    "—"
+                    if score.target_first_rate is None
+                    else f"{score.target_first_rate * 100:.0f}% ({score.resolved})"
+                )
+                expectancy = (
+                    "—" if score.mean_r_multiple is None else f"{score.mean_r_multiple:+.2f}R"
+                )
+                alpha = "—" if score.mean_alpha is None else format_pct(score.mean_alpha)
                 lines.append(
-                    f"{score.action:<12}{score.samples:>4}{score.distinct_days:>6}"
-                    f"{format_pct(score.mean_alpha):>11}"
-                    f"{format_pct(score.median_alpha):>11}"
+                    f"{score.action:<12}{score.samples:>4}"
+                    f"{format_pct(score.mean_return):>10}{alpha:>10}"
                     f"{score.correct_direction_rate * 100:>11.0f}%"
-                    f"{format_pct(score.mean_worst_excursion):>11}"
+                    f"{format_pct(score.mean_worst_excursion):>10}"
+                    f"{target_first:>12}{expectancy:>10}"
                 )
         lines.append("")
         lines.append(
-            "Alpha đo theo chiều long và không đảo dấu theo action: "
-            "ACCUMULATE/HOLD đúng hướng khi alpha dương, còn REDUCE/EXIT/NO_TRADE "
-            "đúng hướng khi alpha âm (desk rời đi và tài sản kém benchmark)."
+            "Đúng hướng so với giữ USDT: ACCUMULATE/HOLD đúng khi lợi nhuận dương, "
+            "REDUCE/EXIT/NO_TRADE đúng khi tài sản giảm."
         )
         lines.append(
-            f"Ngày = số cặp (symbol, ngày quyết định) riêng biệt. Các cửa sổ "
-            f"{self.horizon_days} ngày chồng lấn nhau nên N không phải số quan sát độc lập."
+            "TP trước = tỷ lệ chạm target trước stop trong số setup đã chạm một mức "
+            "(ngày chạm cả hai tính là stop); Kỳ vọng = trung bình R, target = +R:R, "
+            "stop = −1R, chưa chạm = lãi/lỗ theo giá đóng cửa cuối chia rủi ro."
+        )
+        lines.append(
+            f"Mỗi symbol/ngày/action tính một lần. Các cửa sổ {self.horizon_days} ngày "
+            "vẫn chồng lấn nên N không phải số quan sát độc lập."
         )
         lines.append(
             "Tệ nhất = trung bình điểm tệ nhất trong cửa sổ (min lợi nhuận), "
@@ -121,16 +142,12 @@ def _benchmark_of(item: dict[str, Any]) -> tuple[str, bool]:
 
 
 def build_scorecard(reflections: list[dict[str, Any]]) -> Scorecard:
-    buckets: dict[tuple[str, str], list[tuple[Decimal, Decimal, tuple[str, str]]]] = {}
+    latest: dict[tuple[str, str, str, str], tuple[str, dict[str, Any]]] = {}
     inferred_flags: dict[str, bool] = {}
     skipped_no_action = 0
     skipped_unknown_action = 0
-    skipped_benchmark = 0
     for item in reflections:
         bench, inferred = _benchmark_of(item)
-        if item["symbol"] == bench:
-            skipped_benchmark += 1
-            continue
         payload = item["payload"]
         action = payload.get("decision_action")
         if not action:
@@ -142,59 +159,69 @@ def build_scorecard(reflections: list[dict[str, Any]]) -> Scorecard:
             continue
         # Hàng cũ không có decision_cutoff: lùi về created_at, thô hơn nhưng vẫn
         # gộp được các lần chạy cùng ngày của cùng symbol.
-        day = str(payload.get("decision_cutoff") or item["created_at"])[:10]
+        when = str(payload.get("decision_cutoff") or item["created_at"])
         inferred_flags[bench] = inferred_flags.get(bench, False) or inferred
-        buckets.setdefault((bench, action), []).append(
-            (
-                Decimal(str(payload["alpha"])),
-                Decimal(str(payload["maximum_adverse_excursion"])),
-                (item["symbol"], day),
-            )
-        )
+        key = (bench, action, item["symbol"], when[:10])
+        if key not in latest or when > latest[key][0]:
+            latest[key] = (when, item)
+    buckets: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for (bench, action, _, _), (_, item) in latest.items():
+        buckets.setdefault((bench, action), []).append(item)
     groups = tuple(
         BenchmarkGroup(
             benchmark=bench,
             inferred=inferred_flags[bench],
             scores=tuple(
-                _score(action, buckets[(bench, action)])
+                _score(action, bench, buckets[(bench, action)])
                 for action in ACTIONS
                 if (bench, action) in buckets
             ),
         )
         for bench in sorted(inferred_flags)
     )
+    counted = len(reflections) - skipped_no_action - skipped_unknown_action
     return Scorecard(
         horizon_days=REFLECTION_HORIZON_DAYS,
         benchmark=BENCHMARK_SYMBOL,
-        scored=sum(s.samples for g in groups for s in g.scores),
+        scored=len(latest),
+        collapsed=counted - len(latest),
         skipped_no_action=skipped_no_action,
         skipped_unknown_action=skipped_unknown_action,
-        skipped_benchmark=skipped_benchmark,
         groups=groups,
     )
 
 
-def _score(action: str, rows: list[tuple[Decimal, Decimal, tuple[str, str]]]) -> ActionScore:
-    alphas = sorted(alpha for alpha, _, _ in rows)
-    count = len(alphas)
-    middle = count // 2
-    median = (
-        alphas[middle] if count % 2 else (alphas[middle - 1] + alphas[middle]) / Decimal(2)
-    )
-    correct = sum(1 for alpha in alphas if _is_correct(action, alpha))
+def _mean(values: list[Decimal]) -> Decimal | None:
+    return (sum(values, Decimal(0)) / len(values)).quantize(QUANTUM) if values else None
+
+
+def _score(action: str, bench: str, rows: list[dict[str, Any]]) -> ActionScore:
+    payloads = [row["payload"] for row in rows]
+    returns = [Decimal(str(p["realized_return"])) for p in payloads]
+    alphas = [Decimal(str(row["payload"]["alpha"])) for row in rows if row["symbol"] != bench]
+    outcomes = [p["barrier_outcome"] for p in payloads if p.get("barrier_outcome")]
+    resolved = [outcome for outcome in outcomes if outcome in {"target", "stop"}]
+    r_multiples = [Decimal(str(p["r_multiple"])) for p in payloads if p.get("barrier_outcome")]
+    correct = sum(1 for value in returns if _is_correct(action, value))
     return ActionScore(
         action=action,
-        samples=count,
-        distinct_days=len({key for _, _, key in rows}),
-        mean_alpha=(sum(alphas, Decimal(0)) / count).quantize(QUANTUM),
-        median_alpha=median.quantize(QUANTUM),
-        correct_direction_rate=(Decimal(correct) / count).quantize(QUANTUM),
-        mean_worst_excursion=(sum((mae for _, mae, _ in rows), Decimal(0)) / count).quantize(
-            QUANTUM
+        samples=len(rows),
+        mean_return=_mean(returns),
+        mean_alpha=_mean(alphas),
+        correct_direction_rate=(Decimal(correct) / len(rows)).quantize(QUANTUM),
+        mean_worst_excursion=_mean(
+            [Decimal(str(p["maximum_adverse_excursion"])) for p in payloads]
         ),
+        resolved=len(resolved),
+        target_first_rate=(
+            (Decimal(resolved.count("target")) / len(resolved)).quantize(QUANTUM)
+            if resolved
+            else None
+        ),
+        mean_r_multiple=_mean(r_multiples),
     )
 
 
-def _is_correct(action: str, alpha: Decimal) -> bool:
-    """Alpha là long-only, nên chiều đúng phụ thuộc vào việc desk có giữ hàng không."""
-    return alpha > 0 if action in LONG_ACTIONS else alpha < 0
+def _is_correct(action: str, realized_return: Decimal) -> bool:
+    """Phương án thay thế là giữ USDT, nên chiều đúng phụ thuộc vào việc desk có giữ hàng không."""
+    return realized_return > 0 if action in LONG_ACTIONS else realized_return < 0

@@ -117,11 +117,22 @@ def _check_symbol(value: str) -> str:
 
 class AnalyzeArgs(_Args):
     symbol: str
+    model_preset: str | None = None
 
     @field_validator("symbol")
     @classmethod
     def _symbol(cls, value: str) -> str:
         return _check_symbol(value)
+
+    @field_validator("model_preset")
+    @classmethod
+    def _model_preset(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        norm = value.lower().strip()
+        if norm not in {"gemi-3.8", "hybrid-deepseek", "deepseek-pro"}:
+            raise ValueError(f"Unknown model preset: {value}")
+        return norm
 
 
 class ReflectionsArgs(_Args):

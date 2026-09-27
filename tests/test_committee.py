@@ -22,7 +22,7 @@ from crypto_desk.data import EvidenceSnapshot
 from crypto_desk.domain import EvidenceItem, SymbolRules
 
 
-def valid_snapshot() -> EvidenceSnapshot:
+def valid_snapshot(atr14_1d: str | None = "2500") -> EvidenceSnapshot:
     payloads = {
         "spot": {
             "symbol": "BTCUSDT",
@@ -32,7 +32,26 @@ def valid_snapshot() -> EvidenceSnapshot:
             "change_24h_pct": "1.5",
             "daily_closes": ["90000", "100000"],
             "four_hour_closes": ["98000", "100000"],
+            "technical_indicators": {
+                "version": "technical-v1",
+                "daily_as_of": "2026-07-16T23:59:59.999000+00:00",
+                "four_hour_as_of": "2026-07-16T23:59:59.999000+00:00",
+                "ema20_1d": "99000",
+                "ema50_1d": "95000",
+                "rsi14_4h": "62.5",
+                "atr14_4h": "1000",
+                "atr14_1d": atr14_1d,
+            },
             "depth": {"bids": [["99999", "1"]], "asks": [["100001", "1"]]},
+            "depth_summary": {
+                "bid_levels": 1,
+                "ask_levels": 1,
+                "bid_qty": "1",
+                "ask_qty": "1",
+                "bid_notional_usdt": "99999.00",
+                "ask_notional_usdt": "100001.00",
+                "ask_to_bid_qty_ratio": "1.00",
+            },
             "rules": {"tick_size": "0.01"},
         },
         "news": {
@@ -50,6 +69,15 @@ def valid_snapshot() -> EvidenceSnapshot:
             "symbol": "BTCUSDT",
             "funding_rate": "0.0001",
             "open_interest": "120000",
+            "funding_rate_trend": "stable",
+            "oi_change_1h_pct": "0.1",
+            "long_short_ratio": "2.5",
+            "top_trader_ratio": "1.9",
+            "taker_buy_sell_ratio": "0.65",
+            "oi_change_24h_pct": "1.2",
+            "taker_buy_sell_ratio_24h": "0.98",
+            "long_short_ratio_pctile_20d": "40",
+            "top_trader_ratio_pctile_20d": "55",
         },
         "reference": {
             "symbol": "BTCUSDT",
@@ -139,7 +167,7 @@ class FakeLLM:
         return {
             "action": "ACCUMULATE",
             "conviction": "7",
-            "decision_reason": "Spot trend supports an entry with gross R:R 2.0.",
+            "decision_reason": "Spot trend supports an entry above nearby support.",
             "bull_case": "Xu hướng và thanh khoản đồng thuận.",
             "bear_case": "Funding có thể đảo chiều.",
             "catalysts": ["Dòng tiền Spot duy trì."],
@@ -170,8 +198,9 @@ def test_committee_runs_specialists_before_exactly_two_debate_rounds():
         "bull_round_2",
         "bear_round_2",
         "manager",
+        "manager_confirm",
     ]
-    assert fake_llm.models == ["gemini-3.6-flash"] * 9
+    assert fake_llm.models == ["gemini-3.6-flash"] * 10
     assert result.decision.evidence_ids == snapshot.evidence_ids
     assert result.decision.action == "ACCUMULATE"
     assert (
@@ -199,6 +228,7 @@ def test_committee_prompts_require_english_and_isolate_specialists():
             "change_24h_pct",
             "daily_closes",
             "four_hour_closes",
+            "technical_indicators",
         },
         "liquidity": {
             "symbol",
@@ -206,10 +236,23 @@ def test_committee_prompts_require_english_and_isolate_specialists():
             "spread",
             "quote_volume",
             "depth",
+            "depth_summary",
             "rules",
         },
         "news": {"symbol", "items"},
-        "derivatives": {"symbol", "funding_rate", "open_interest"},
+        # Hourly OI change and taker ratio stay out: noise for a 20-day thesis.
+        "derivatives": {
+            "symbol",
+            "funding_rate",
+            "open_interest",
+            "funding_rate_trend",
+            "long_short_ratio",
+            "top_trader_ratio",
+            "oi_change_24h_pct",
+            "taker_buy_sell_ratio_24h",
+            "long_short_ratio_pctile_20d",
+            "top_trader_ratio_pctile_20d",
+        },
     }
     for role, fields in expected.items():
         payload = requests[role]["payload"]
@@ -224,6 +267,13 @@ def test_committee_prompts_require_english_and_isolate_specialists():
     assert requests["bear_round_2"]["payload"]["round_number"] == 2
     assert requests["manager"]["payload"]["stage"] == "manager"
     assert requests["manager"]["payload"]["position_quantity"] == "0"
+    assert (
+        requests["technical"]["payload"]["snapshot"]["evidence"]["payload"]["technical_indicators"][
+            "rsi14_4h"
+        ]
+        == "62.5"
+    )
+    assert "closed-candle as_of" in requests["technical"]["system_prompt"]
     for stage in ("bull_round_1", "bear_round_1"):
         prompt = requests[stage]["system_prompt"]
         assert "asymmetry" in prompt
@@ -234,6 +284,11 @@ def test_committee_prompts_require_english_and_isolate_specialists():
     assert "decision_reason" in manager_prompt
     assert "otherwise use an empty list" in manager_prompt
     assert "null" in requests["derivatives"]["system_prompt"]
+    assert "pctile_20d" in requests["derivatives"]["system_prompt"]
+    assert "not a directional signal" in requests["liquidity"]["system_prompt"]
+    assert all(
+        "20-day thesis horizon" in request["system_prompt"] for request in requests.values()
+    )
 
 
 def test_invalid_manager_schema_retries_once_then_no_trade():
@@ -302,6 +357,38 @@ def test_invalid_accumulate_price_order_retries_then_no_trade():
     assert "stop < entry < target" in result.decision.reason
 
 
+def test_accumulate_stands_only_when_an_independent_manager_rerun_agrees():
+    fake_llm = FakeLLM()
+    original_generate = fake_llm.generate
+
+    def disagreeing(**kwargs):
+        response = original_generate(**kwargs)
+        if kwargs["stage"] == "manager_confirm":
+            response.update(
+                action="NO_TRADE",
+                decision_reason="Taker flow at 0.65 leaves no clear edge to add.",
+            )
+        return response
+
+    fake_llm.generate = disagreeing
+    result = CryptoCommittee(fake_llm).run(valid_snapshot())
+
+    assert result.decision.action == "NO_TRADE"
+    assert result.decision.decided
+    assert "confirmation" in result.decision.reason
+    assert "Taker flow at 0.65" in result.decision.reason
+
+
+def test_decisions_other_than_accumulate_skip_the_confirmation_rerun():
+    fake_llm = FakeLLM()
+    manager_levels(fake_llm, action="NO_TRADE")
+
+    result = CryptoCommittee(fake_llm).run(valid_snapshot())
+
+    assert result.decision.action == "NO_TRADE"
+    assert fake_llm.count("manager_confirm") == 0
+
+
 def test_crypto_accumulate_requires_minimum_gross_reward_risk():
     for target, action in (("107500", "ACCUMULATE"), ("107000", "NO_TRADE")):
         fake_llm = FakeLLM()
@@ -311,7 +398,7 @@ def test_crypto_accumulate_requires_minimum_gross_reward_risk():
             response = original_generate(**kwargs)
             if kwargs["stage"] == "manager":
                 response["target"] = target
-                response["decision_reason"] = "Proposed Spot USDT setup is subject to R:R gate."
+                response["decision_reason"] = "Proposed Spot USDT setup has a narrow upside edge."
             return response
 
         fake_llm.generate = with_target
@@ -323,6 +410,54 @@ def test_crypto_accumulate_requires_minimum_gross_reward_risk():
             assert fake_llm.count("manager") == 2
         else:
             assert "= 1.50" in result.decision.reason
+
+
+def manager_levels(fake_llm: FakeLLM, **levels: str) -> None:
+    original_generate = fake_llm.generate
+
+    def with_levels(**kwargs):
+        response = original_generate(**kwargs)
+        if kwargs["stage"] == "manager":
+            response.update(levels)
+        return response
+
+    fake_llm.generate = with_levels
+
+
+def test_accumulate_stop_must_sit_at_least_one_daily_atr_below_entry():
+    # Fixture ATR14_1d is 2500 (ATR14_4h 1000) and entry is 100000; both setups keep
+    # gross R:R at 2.00, so only the stop distance decides.
+    for stop, target, action in (
+        ("97500", "105000", "ACCUMULATE"),
+        ("97501", "104998", "NO_TRADE"),
+    ):
+        fake_llm = FakeLLM()
+        manager_levels(fake_llm, stop=stop, target=target)
+
+        result = CryptoCommittee(fake_llm).run(valid_snapshot())
+
+        assert result.decision.action == action
+        if action == "NO_TRADE":
+            assert "ATR14_1d" in result.decision.reason
+            assert fake_llm.count("manager") == 2
+
+
+def test_accumulate_without_daily_atr_is_rejected():
+    fake_llm = FakeLLM()
+
+    result = CryptoCommittee(fake_llm).run(valid_snapshot(atr14_1d=None))
+
+    assert result.decision.action == "NO_TRADE"
+    assert "ATR14_1d" in result.decision.reason
+
+
+def test_reduce_is_not_blocked_by_the_accumulate_atr_stop_floor():
+    fake_llm = FakeLLM()
+    manager_levels(fake_llm, action="REDUCE", stop="99900", target="101000")
+
+    result = CryptoCommittee(fake_llm).run(valid_snapshot(), position_quantity=Decimal("1"))
+
+    assert result.decision.action == "REDUCE"
 
 
 def test_crypto_hold_preserves_quantified_manager_reason():
@@ -346,6 +481,143 @@ def test_crypto_hold_preserves_quantified_manager_reason():
 
     assert result.decision.action == "HOLD"
     assert result.decision.reason.startswith("Only 0 of 2")
+
+
+def test_no_trade_with_levels_uses_computed_rr_instead_of_model_claim():
+    fake_llm = FakeLLM()
+    original_generate = fake_llm.generate
+
+    def no_trade(**kwargs):
+        response = original_generate(**kwargs)
+        if kwargs["stage"] == "manager":
+            response.update(
+                action="NO_TRADE",
+                decision_reason="Taker buying is weak at 0.92 despite a rising Daily trend.",
+            )
+        return response
+
+    fake_llm.generate = no_trade
+    result = CryptoCommittee(fake_llm).run(valid_snapshot())
+
+    assert result.decision.action == "NO_TRADE"
+    assert result.decision.decided
+    assert (
+        "Computed gross R:R: (110000 - 100000) / (100000 - 95000) = 2.00" in result.decision.reason
+    )
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "The EMA20 stop implies a gross R:R of 0.82.",
+        "Gross R:R is unquantifiable until a breakout confirms direction.",
+    ],
+)
+def test_no_trade_rejects_rr_prose_conflicting_with_stored_levels(reason: str):
+    fake_llm = FakeLLM()
+    original_generate = fake_llm.generate
+
+    def inconsistent(**kwargs):
+        response = original_generate(**kwargs)
+        if kwargs["stage"] == "manager":
+            response.update(action="NO_TRADE", decision_reason=reason)
+        return response
+
+    fake_llm.generate = inconsistent
+    result = CryptoCommittee(fake_llm).run(valid_snapshot())
+
+    assert fake_llm.count("manager") == 2
+    assert not result.decision.decided
+    assert "decision_reason must omit R:R" in result.decision.reason
+    assert [call.status for call in result.calls[-2:]] == ["failure", "failure"]
+
+
+def test_manager_retries_with_consistency_guidance_and_accepts_correction():
+    fake_llm = FakeLLM()
+    original_generate = fake_llm.generate
+
+    def corrected(**kwargs):
+        response = original_generate(**kwargs)
+        if kwargs["stage"] == "manager":
+            response.update(
+                action="NO_TRADE",
+                decision_reason=(
+                    "Gross R:R of 0.82 blocks adding."
+                    if fake_llm.count("manager") == 1
+                    else "Crowded long positioning at 2.70 blocks adding."
+                ),
+            )
+        return response
+
+    fake_llm.generate = corrected
+    result = CryptoCommittee(fake_llm).run(valid_snapshot())
+
+    assert fake_llm.count("manager") == 2
+    assert result.decision.decided
+    assert result.decision.reason.startswith("Crowded long positioning at 2.70")
+    assert "= 2.00" in result.decision.reason
+    assert "previous manager response failed validation" in fake_llm.requests[-1]["system_prompt"]
+
+
+def test_no_trade_rejects_partial_spot_levels():
+    fake_llm = FakeLLM()
+    original_generate = fake_llm.generate
+
+    def partial(**kwargs):
+        response = original_generate(**kwargs)
+        if kwargs["stage"] == "manager":
+            response.update(action="NO_TRADE", target=None)
+        return response
+
+    fake_llm.generate = partial
+    result = CryptoCommittee(fake_llm).run(valid_snapshot())
+
+    assert not result.decision.decided
+    assert "Spot levels must be all present or all null" in result.decision.reason
+
+
+def test_no_trade_rejects_unordered_spot_levels():
+    fake_llm = FakeLLM()
+    original_generate = fake_llm.generate
+
+    def unordered(**kwargs):
+        response = original_generate(**kwargs)
+        if kwargs["stage"] == "manager":
+            response.update(action="NO_TRADE", stop="101000")
+        return response
+
+    fake_llm.generate = unordered
+    result = CryptoCommittee(fake_llm).run(valid_snapshot())
+
+    assert not result.decision.decided
+    assert "stop < entry < target" in result.decision.reason
+
+
+def test_no_trade_rejects_stop_price_in_reason_when_levels_are_null():
+    fake_llm = FakeLLM()
+    original_generate = fake_llm.generate
+
+    def unstructured_stop(**kwargs):
+        response = original_generate(**kwargs)
+        if kwargs["stage"] == "manager":
+            response.update(
+                action="NO_TRADE",
+                entry=None,
+                stop=None,
+                target=None,
+                decision_reason=(
+                    "Ask depth exceeds bid depth 4.16 to 1.96. Using a structural "
+                    "stop below Daily EMA20 at 80350.00 USDT offers insufficient upside."
+                ),
+            )
+        return response
+
+    fake_llm.generate = unstructured_stop
+    result = CryptoCommittee(fake_llm).run(valid_snapshot())
+
+    assert fake_llm.count("manager") == 2
+    assert not result.decision.decided
+    assert "must omit entry/stop/target price claims" in result.decision.reason
 
 
 def test_crypto_manager_requires_decision_reason():
@@ -507,6 +779,43 @@ def test_gemini_adapter_uses_json_schema_without_server_storage():
     assert captured["store"] is False
     assert captured["response_format"][0]["mime_type"] == "application/json"
     assert captured["response_format"][0]["schema"] == AnalystReport.model_json_schema()
+
+
+@pytest.mark.parametrize(
+    ("model", "thinking", "level", "budget"),
+    [
+        ("gemini-3.8-flash", "high", "HIGH", None),
+        ("gemini-3.8-flash", "low", "LOW", None),
+        ("gemini-2.5-pro", "high", None, 2048),
+    ],
+)
+def test_vertex_adapter_sets_thinking_per_model_generation(model, thinking, level, budget):
+    # Gemini 3 bỏ qua thinking_budget khi có response_schema: phải gửi thinking_level.
+    captured: dict[str, Any] = {}
+
+    class Models:
+        def generate_content(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                text=(
+                    '{"stance":"neutral","confidence":"5",'
+                    '"observations":["Không có lợi thế rõ ràng."],'
+                    '"risks":[],"evidence_ids":["evidence-1"]}'
+                )
+            )
+
+    GeminiStructuredClient(SimpleNamespace(vertexai=True, models=Models())).generate(
+        stage="manager",
+        model=model,
+        thinking=thinking,
+        response_model=AnalystReport,
+        system_prompt="Bounded role",
+        payload={"evidence_ids": ["evidence-1"]},
+    )
+
+    thinking_config = captured["config"].thinking_config
+    assert thinking_config.thinking_level == level
+    assert thinking_config.thinking_budget == budget
 
 
 def test_gemini_adapter_paces_consecutive_requests():

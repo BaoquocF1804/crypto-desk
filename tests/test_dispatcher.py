@@ -604,3 +604,65 @@ def test_dispatcher_analyze_and_daily_requests_broker(tmp_path: Path):
     assert all(kwargs.get("broker") is True for kwargs in captured_kwargs)
 
 
+def test_dispatch_analyze_applies_model_preset(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    captured_settings: list[Settings] = []
+
+    class CapturingService(FakeService):
+        def analyze(self, symbol: str):
+            return AnalysisRun(
+                run_id="run-preset",
+                cutoff=iso(NOW),
+                decision=ResearchDecision(
+                    symbol=symbol,
+                    action="NO_TRADE",
+                    conviction=Decimal("0.5"),
+                    bull_case="bull",
+                    bear_case="bear",
+                    catalysts=(),
+                    invalidation="inv",
+                    entry=None,
+                    stop=None,
+                    target=None,
+                    evidence_ids=("ev-1",),
+                    reason="test",
+                    decided=True,
+                ),
+                current_price=Decimal("100000"),
+                report_dir=tmp_path / "report",
+                ticket_id=None,
+            )
+
+    dispatcher = CommandDispatcher(
+        settings,
+        service_factory=lambda **kwargs: captured_settings.append(kwargs.get("settings", settings)) or CapturingService(),
+        store_factory=lambda: store,
+        now=lambda: NOW,
+    )
+
+    # 1. GEMI 3.8
+    dispatcher.dispatch("analyze", {"symbol": "BTCUSDT", "model_preset": "gemi-3.8"}, operator_email=OPERATOR)
+    assert captured_settings[-1].models.provider == "vertexai"
+    assert captured_settings[-1].models.quick == "gemini-3.8-flash"
+    assert captured_settings[-1].models.deep == "gemini-3.8-flash"
+
+    # 2. Hybrid DeepSeek
+    dispatcher.dispatch("analyze", {"symbol": "BTCUSDT", "model_preset": "hybrid-deepseek"}, operator_email=OPERATOR)
+    assert captured_settings[-1].models.provider == "deepseek"
+    assert captured_settings[-1].models.quick == "deepseek-v4-flash"
+    assert captured_settings[-1].models.deep == "deepseek-v4-pro"
+
+    # 3. DeepSeek Pro
+    dispatcher.dispatch("analyze", {"symbol": "BTCUSDT", "model_preset": "deepseek-pro"}, operator_email=OPERATOR)
+    assert captured_settings[-1].models.provider == "deepseek"
+    assert captured_settings[-1].models.quick == "deepseek-v4-pro"
+    assert captured_settings[-1].models.deep == "deepseek-v4-pro"
+
+    # 4. Invalid preset rejected
+    with pytest.raises(DispatchError) as excinfo:
+        dispatcher.dispatch("analyze", {"symbol": "BTCUSDT", "model_preset": "unknown-model"}, operator_email=OPERATOR)
+    assert excinfo.value.code == "INVALID_COMMAND"
+
+
+
