@@ -203,6 +203,35 @@ SPECIALIST_EVIDENCE = {
 }
 
 
+# Specialists already read these; at the desk's horizon the debate kept citing them as
+# reasons (hourly taker flow, a 20-level book spanning ~0.01% of price).
+DEBATE_HIDDEN_FIELDS = {
+    "spot": ("depth",),
+    "derivatives": ("oi_change_1h_pct", "taker_buy_sell_ratio"),
+}
+# Top-level snapshot fields repeat the item payloads (closes twice, hourly ratios again),
+# so the debate reads items only.
+DEBATE_SNAPSHOT_FIELDS = ("symbol", "cutoff", "binance_mid", "mid", "industry")
+
+
+def _debate_snapshot(snapshot: Any) -> dict[str, Any]:
+    full = to_jsonable(snapshot)
+    items = [
+        {
+            **item,
+            "payload": {
+                name: value
+                for name, value in item["payload"].items()
+                if name not in DEBATE_HIDDEN_FIELDS.get(item["kind"], ())
+            },
+        }
+        for item in full["items"]
+    ]
+    return {name: full[name] for name in DEBATE_SNAPSHOT_FIELDS if name in full} | {
+        "items": items
+    }
+
+
 def _system_prompt(role: str) -> str:
     return f"{OUTPUT_CONTRACT}\n\n{ROLE_PROMPTS[role]}"
 
@@ -1068,7 +1097,7 @@ class CryptoCommittee:
     ) -> dict[str, Any]:
         bounded_reflections = [str(value)[:2000] for value in reflections[-5:]]
         payload: dict[str, Any] = {
-            "snapshot": to_jsonable(snapshot),
+            "snapshot": _debate_snapshot(snapshot),
             "evidence_ids": list(snapshot.evidence_ids),
             "reflections": bounded_reflections,
             "position_quantity": str(position_quantity),

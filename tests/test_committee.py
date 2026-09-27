@@ -291,6 +291,38 @@ def test_committee_prompts_require_english_and_isolate_specialists():
     )
 
 
+def _all_keys(value: Any) -> set[str]:
+    if isinstance(value, dict):
+        return set(value) | {key for item in value.values() for key in _all_keys(item)}
+    if isinstance(value, (list, tuple)):
+        return {key for item in value for key in _all_keys(item)}
+    return set()
+
+
+def test_debate_payloads_hide_hour_scale_fields_but_keep_what_prompts_require():
+    fake_llm = FakeLLM()
+    snapshot = valid_snapshot()
+
+    CryptoCommittee(fake_llm).run(snapshot)
+
+    debate = [r for r in fake_llm.requests if r["stage"].startswith(("bull", "bear", "manager"))]
+    assert debate
+    for request in debate:
+        keys = _all_keys(request["payload"]["snapshot"])
+        # Specialists đã đọc các trường này; ở horizon 20 ngày chúng chỉ là nhiễu bị viện dẫn.
+        assert not {"depth", "oi_change_1h_pct", "taker_buy_sell_ratio"} & keys
+        # Chuỗi close chỉ đi một lần, trong item spot.
+        assert "daily_closes" not in request["payload"]["snapshot"]
+        assert {
+            "atr14_1d",
+            "depth_summary",
+            "taker_buy_sell_ratio_24h",
+            "long_short_ratio_pctile_20d",
+            "daily_closes",
+        } <= keys
+        assert request["payload"]["evidence_ids"] == list(snapshot.evidence_ids)
+
+
 def test_invalid_manager_schema_retries_once_then_no_trade():
     fake_llm = FakeLLM()
     fake_llm.invalid_for = {"manager"}
