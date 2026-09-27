@@ -15,7 +15,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .committee import BASE_OUTPUT_CONTRACT, ProviderError, StructuredClient
-from .config import REFLECTION_HORIZON_DAYS
+from .config import REFLECTION_HORIZON_DAYS, WATCHLIST_MAX_ACTIVE
 from .data import EvidenceError, _aware, _pct_change, _percentile_rank, _utc_from_ms, price_structure
 from .domain import to_jsonable, utcnow
 from .indicators import atr, ema
@@ -196,7 +196,8 @@ def compute_features(
     )
 
 
-MAX_PICKS = 3
+# A scan never picks more than the watchlist can show, so its picks always fit on screen.
+MAX_PICKS = WATCHLIST_MAX_ACTIVE
 
 FIELD_NOTES = {
     "quote_volume_musd": "24h Spot quote volume in million USDT",
@@ -219,8 +220,8 @@ FIELD_NOTES = {
 SCAN_ROLE = (
     "You are the screening analyst of a long-only Binance Spot research desk. Rank the "
     f"candidates by the strength of evidence for a {REFLECTION_HORIZON_DAYS}-day Spot long "
-    f"thesis and return at most {MAX_PICKS} picks; return fewer, or none, when evidence is "
-    "weak. Strong evidence: ema20_above_ema50 true with price above EMA20; "
+    f"thesis and return at most {MAX_PICKS} picks, strongest first; return fewer, or none, "
+    "when evidence is weak. Strong evidence: ema20_above_ema50 true with price above EMA20; "
     "resistance_distance_atr well above support_distance_atr, or no resistance at all, so "
     "a stop at least one daily ATR below entry still leaves room for gross R:R of 1.5; "
     "long_short_pctile_20d not high; taker_buy_sell_24h and oi_change_24h_pct supportive. "

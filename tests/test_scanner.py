@@ -9,6 +9,7 @@ from crypto_desk.committee import ProviderError
 from crypto_desk.data import EvidenceError, Fetched
 from crypto_desk.scanner import (
     FEATURE_FIELDS,
+    MAX_PICKS,
     UNIVERSE_SIZE,
     Candidate,
     ScanError,
@@ -230,7 +231,6 @@ def test_ranking_retries_once_with_the_validation_error():
     [
         [_pick("ZZZUSDT")],
         [_pick("AUSDT"), _pick("AUSDT")],
-        [_pick("AUSDT"), _pick("AUSDT"), _pick("AUSDT"), _pick("AUSDT")],
     ],
 )
 def test_ranking_fails_after_two_invalid_answers(picks):
@@ -238,6 +238,18 @@ def test_ranking_fails_after_two_invalid_answers(picks):
 
     with pytest.raises(ScanError):
         rank_candidates(llm, _features("AUSDT"), model="flash", thinking="low")
+
+
+def test_ranking_takes_up_to_max_picks():
+    symbols = [f"C{index:02d}USDT" for index in range(MAX_PICKS + 1)]
+    too_many = {"picks": [_pick(symbol) for symbol in symbols], "summary": "Eleven."}
+    llm = FakeScanLLM(too_many, {**too_many, "picks": too_many["picks"][:MAX_PICKS]})
+
+    ranking = rank_candidates(llm, _features(*symbols), model="flash", thinking="low")
+
+    assert MAX_PICKS == 10
+    assert len(ranking.picks) == MAX_PICKS
+    assert "failed validation" in llm.calls[1]["system_prompt"]
 
 
 def test_ranking_may_pick_nothing():

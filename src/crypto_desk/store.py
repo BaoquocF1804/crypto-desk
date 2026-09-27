@@ -712,26 +712,22 @@ class Store:
         )
         self.db.commit()
 
-    def set_watchlist_run(self, symbol: str, run_id: str) -> None:
-        entry = self.watchlist_entry(symbol)
-        if entry is None:
-            return
-        self.db.execute(
-            "UPDATE watchlist SET payload=? WHERE symbol=?",
-            (_json({**entry["payload"], "last_run_id": run_id}), symbol),
-        )
-        self.db.commit()
-
     def watchlist_entry(self, symbol: str) -> dict[str, Any] | None:
         row = self.db.execute("SELECT * FROM watchlist WHERE symbol=?", (symbol,)).fetchone()
         return None if row is None else self._watchlist_row(row)
 
     def active_watchlist(self, now: str, limit: int = WATCHLIST_MAX_ACTIVE) -> list[dict[str, Any]]:
-        rows = self.db.execute(
-            "SELECT * FROM watchlist WHERE expires_at > ? ORDER BY last_picked_at DESC LIMIT ?",
-            (now, limit),
-        ).fetchall()
-        return [self._watchlist_row(row) for row in rows]
+        rows = self.db.execute("SELECT * FROM watchlist WHERE expires_at > ?", (now,)).fetchall()
+        entries = [self._watchlist_row(row) for row in rows]
+        # One scan writes every pick with the same last_picked_at; the score orders them.
+        entries.sort(
+            key=lambda entry: (
+                entry["last_picked_at"],
+                Decimal(str(entry["payload"].get("evidence_score", "0"))),
+            ),
+            reverse=True,
+        )
+        return entries[:limit]
 
     def watchlist_symbols(self) -> tuple[str, ...]:
         rows = self.db.execute("SELECT symbol FROM watchlist ORDER BY symbol").fetchall()

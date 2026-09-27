@@ -426,13 +426,16 @@ def test_active_watchlist_skips_expired_entries_newest_first(tmp_path: Path):
     assert store.watchlist_symbols() == ("AUSDT", "BUSDT", "OLDUSDT")
 
 
-def test_watchlist_records_the_latest_research_run(tmp_path: Path):
+def test_picks_of_one_scan_are_listed_by_score(tmp_path: Path):
     store = Store(tmp_path / "crypto.db")
-    _watch(store, "NEARUSDT", "2026-09-26T00:00:00+00:00", "2026-10-03T00:00:00+00:00")
+    _watch(store, "OLDUSDT", "2026-09-25T00:00:00+00:00", "2026-10-02T00:00:00+00:00", "10")
+    _watch(store, "NINEUSDT", "2026-09-26T00:00:00+00:00", "2026-10-03T00:00:00+00:00", "9")
+    _watch(store, "TENUSDT", "2026-09-26T00:00:00+00:00", "2026-10-03T00:00:00+00:00", "10")
 
-    store.set_watchlist_run("NEARUSDT", "run-9")
+    active = store.active_watchlist("2026-09-27T00:00:00+00:00", limit=2)
 
-    assert store.watchlist_entry("NEARUSDT")["payload"]["last_run_id"] == "run-9"
+    # Newest scan first, then score as a number: as text "9" would beat "10".
+    assert [entry["symbol"] for entry in active] == ["TENUSDT", "NINEUSDT"]
 
 
 def test_a_version_three_database_migrates_to_four(tmp_path: Path):
