@@ -305,6 +305,20 @@ def live_code(ctx: typer.Context, ticket_id: str) -> None:
 
 
 @app.command()
+def reflect(ctx: typer.Context) -> None:
+    """Chấm ngay các quyết định đã đủ horizon, không chạy phân tích mới."""
+    settings = _load(ctx)
+    now = _utcnow()
+    _emit(
+        ctx,
+        {
+            "crypto": _service(settings, committee=False).refresh_reflections(now),
+            "vn": _vn_service(settings, committee=False).refresh_reflections(now),
+        },
+    )
+
+
+@app.command()
 def reflections(
     ctx: typer.Context,
     symbol: str | None = None,

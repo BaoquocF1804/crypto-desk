@@ -78,6 +78,7 @@ uv run desk --config config.yaml --json doctor --online
 uv run desk --config config.yaml --json sync
 uv run desk --config config.yaml --json screen
 uv run desk --config config.yaml --json analyze BTCUSDT
+uv run desk --config config.yaml --json reflect
 uv run desk --config config.yaml --json tickets
 uv run desk --config config.yaml --json approve TICKET_ID
 uv run desk --config config.yaml --json orders
@@ -105,6 +106,8 @@ từ lần chạy cũ hơn ít nhất 4 giờ. Tỷ lệ long/short đi kèm per
 (alpha so với BTCUSDT là cột phụ). Quyết định có entry/stop/target được chấm thêm
 theo mức nào chạm trước trên high/low nến ngày, quy ra bội số R. Các lần chạy trùng
 symbol/ngày/action chỉ tính một lần.
+`desk reflect` chấm ngay mọi quyết định crypto và VN đã đủ 20 ngày mà không chạy phân
+tích mới; `scripts/daily.sh` gọi nó sau job daily.
 
 Testnet execution chỉ được bật sau smoke test read-only:
 

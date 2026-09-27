@@ -2123,3 +2123,27 @@ def test_render_reflection_states_which_setup_level_was_hit_first():
     )
 
     assert "setup hit stop first (-1.00R)" in line
+
+
+def test_reflect_command_grades_both_markets_without_running_an_analysis(
+    tmp_path: Path, monkeypatch
+):
+    config = _write_config(tmp_path)
+    calls: list[tuple[str, bool]] = []
+
+    class _Service:
+        def __init__(self, name: str):
+            self.name = name
+
+        def refresh_reflections(self, cutoff):
+            calls.append((self.name, cutoff.tzinfo is not None))
+            return [f"{self.name}-run"]
+
+    monkeypatch.setattr("crypto_desk.cli._service", lambda settings, **kw: _Service("crypto"))
+    monkeypatch.setattr("crypto_desk.cli._vn_service", lambda settings, **kw: _Service("vn"))
+
+    result = CliRunner().invoke(app, ["--config", str(config), "--json", "reflect"])
+
+    assert result.exit_code == 0, result.stdout
+    assert json.loads(result.stdout) == {"crypto": ["crypto-run"], "vn": ["vn-run"]}
+    assert calls == [("crypto", True), ("vn", True)]
