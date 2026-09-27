@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** `desk scan` quét top 30 cặp USDT, Gemini Flash chọn tối đa 3 đồng có evidence mạnh, đưa vào watchlist nghiên cứu, chạy committee đầy đủ (không bao giờ tạo ticket), chấm điểm thành nhóm riêng và hiện trên dashboard.
+**Goal:** `desk scan` quét top 30 cặp USDT, Gemini Flash chọn tối đa 10 đồng có evidence mạnh vào watchlist nghiên cứu. Committee đầy đủ tự chạy cho 3 đồng điểm cao nhất; 7 đồng còn lại người dùng tự phân tích bằng `desk analyze SYMBOL --research`. Không bao giờ tạo ticket. Run nghiên cứu được chấm điểm thành nhóm riêng và hiện trên dashboard.
 
 **Architecture:** Module mới `scanner.py` gồm ba hàm thuần (`discover_universe`, `compute_features`, `rank_candidates`) và `WatchlistScanner.run`, chỉ đọc qua `PublicDataClient`. `Store` lên schema v4 với bảng `watchlist`. `CryptoDeskService` có thêm `scan()` và `analyze(..., research=True)`. Reflection mang `cohort`, scorecard gộp theo `(benchmark, cohort)`. Dashboard có mục `watchlist` riêng, không đụng `KNOWN_SYMBOLS`.
 
@@ -12,13 +12,18 @@
 
 ## Global Constraints
 
+- **Trước Task 6, `src/crypto_desk/service.py` và `tests/test_service_cli.py` không được còn thay đổi ngoài plan.** Task 6–9 `git add` nguyên hai file này. Lúc sửa plan (27/09, 13:56) hai file còn phần ticket TTL chưa commit. Commit riêng phần đó trước, hoặc dừng lại hỏi người dùng.
 - Python `>=3.12,<3.13`; ruff `line-length = 100`. Chạy: `uv run pytest -q`, `uv run ruff check src tests`.
 - Mọi giá và tỉ lệ dùng `Decimal`; mọi file `.py` mở đầu bằng `from __future__ import annotations`.
 - Không thêm dependency, cả Python lẫn npm.
 - Prompt gửi model viết tiếng Anh. Văn bản cho người dùng viết tiếng Việt có dấu.
 - **Run nghiên cứu không bao giờ tạo ticket.** Không đổi `V1_SYMBOLS`, `settings.symbols`, `execution.py`, `risk.py`, `broker.py`.
 - Contract dashboard chỉ được **thêm**. `KNOWN_SYMBOLS` và các trường hiện có giữ nguyên.
-- Hằng số: `UNIVERSE_SIZE = 30`, `MIN_SCAN_QUOTE_VOLUME = 20 000 000`, `MAX_PICKS = 3`, `WATCHLIST_TTL_DAYS = 7`, `WATCHLIST_MAX_ACTIVE = 10`.
+- Hằng số:
+  - `UNIVERSE_SIZE = 30`, `MIN_SCAN_QUOTE_VOLUME = 20 000 000`;
+  - `WATCHLIST_MAX_ACTIVE = 10`, và `MAX_PICKS = WATCHLIST_MAX_ACTIVE`;
+  - `AUTO_ANALYZE_PICKS = 3`, `WATCHLIST_TTL_DAYS = 7`.
+- `WATCHLIST_TTL_DAYS` và `WATCHLIST_MAX_ACTIVE` được thêm vào `config.py` ở Task 5, `AUTO_ANALYZE_PICKS` ở Task 7. Task 4 viết `MAX_PICKS = 3` theo bản plan trước; Task 7 Step 0 đổi thành `WATCHLIST_MAX_ACTIVE`.
 - Test web: `cd web && npm run test:unit`.
 - Import mới trong test và trong `scanner.py` luôn gộp lên **đầu file** (ruff E402 bắt import giữa file); các đoạn test trong plan chỉ ghi import cạnh code cho dễ đọc.
 - Commit message kết thúc bằng `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
@@ -26,11 +31,15 @@
 
 ## Review Focus
 
-- **CoinGecko map sai ticker trùng tên** (ví dụ `GRAM`): bước committee phải chặn, không có ticket, không crash. Bộ kiểm tra lệch giá 0.5% sẵn có lo phần này; Task 6 ghim rằng run nghiên cứu lỗi evidence vẫn ra NO_TRADE bình thường.
-- **Nến ngày đang mở lọt vào bảng quét:** `fetch_features` phải bỏ nến có close time sau `now`. Test trong Task 4 cho fake trả thêm một nến mở.
-- **Watchlist entry hết hạn giữa hai lệnh:** `desk analyze X --research` phải từ chối rõ ràng. Task 6.
+- **Chỉ top 3 được phân tích tự động:** mọi pick vào watchlist, nhưng chỉ 3 pick điểm cao nhất tốn committee. Pick còn lại không có run và không tốn lượt gọi model. Task 7 ghim `committee.calls == 3` khi có 4 pick.
+- **CoinGecko map sai ticker trùng tên:** map theo vốn hoá. Lúc viết, `GRAMUSDT` → `the-open-network` là đúng (TON đổi tên, giá lệch 0.06%). Nếu map sai, bộ kiểm tra lệch giá 0.5% sẵn có chặn ngay ở `builder.build`, trước mọi lời gọi model. Task 6 ghim rằng run nghiên cứu lỗi evidence ra NO_TRADE, không ticket, không gọi committee.
+- **Nến ngày đang mở lọt vào bảng quét:** `WatchlistScanner._features` phải bỏ nến có close time sau `now`. Test trong Task 4 cho fake trả thêm một nến mở.
+- **Hợp đồng delivery không có funding rate:** `/fapi/v1/premiumIndex` trả cả quarterly delivery futures có `lastFundingRate` rỗng hoặc `None`; `WatchlistScanner.run` phải lọc an toàn thay vì ném `InvalidOperation`. Task 4.
+- **Watchlist entry hết hạn giữa hai lệnh:** `desk analyze X --research` phải từ chối rõ ràng. Task 6 (service raise) và Task 9 (CLI exit code 2, không traceback).
 - **Người dùng thêm một đồng watchlist vào allowlist:** run nghiên cứu cũ vẫn chấm vào nhóm `watchlist`, vì cohort đọc từ `research_only` của decision chứ không từ allowlist hiện tại. Task 8.
-- **Payload dashboard vượt giới hạn:** tối đa 10 entry, và trường văn bản bị cắt theo giới hạn của parser. Task 11 test entry thứ 11 bị từ chối.
+- **Payload dashboard vượt giới hạn:**
+  - tối đa 10 entry, và trường văn bản bị cắt theo giới hạn của parser; Task 11 test entry thứ 11 bị từ chối;
+  - đo ngày 27/09: snapshot thật khoảng 70 KB, 10 entry thêm khoảng 25–35 KB, giới hạn là 128 KB.
 
 ---
 
@@ -722,7 +731,13 @@ class FakeMarket:
         return _fetched([{"id": "near", "symbol": "near"}, {"id": "avalanche-2", "symbol": "avax"}])
 
     def premium_index_all(self):
-        return _fetched([{"symbol": "NEARUSDT", "lastFundingRate": "0.0001"}])
+        return _fetched(
+            [
+                {"symbol": "NEARUSDT", "lastFundingRate": "0.0001"},
+                {"symbol": "BTCUSDT_260925", "lastFundingRate": ""},
+                {"symbol": "UNKNOWN", "lastFundingRate": None},
+            ]
+        )
 
     def klines(self, symbol, interval, limit):
         if symbol == self.fail_symbol:
@@ -960,10 +975,14 @@ class WatchlistScanner:
                 self.client.coingecko_markets().payload,
                 exclude=exclude,
             )
-            funding = {
-                str(row["symbol"]): Decimal(str(row["lastFundingRate"]))
-                for row in self.client.premium_index_all().payload
-            }
+            funding: dict[str, Decimal] = {}
+            for row in self.client.premium_index_all().payload:
+                rate = row.get("lastFundingRate")
+                if rate not in (None, ""):
+                    try:
+                        funding[str(row["symbol"])] = Decimal(str(rate))
+                    except (InvalidOperation, TypeError):
+                        pass
         except _FETCH_ERRORS as exc:
             return ScanResult((), {}, (), None, f"universe:{type(exc).__name__}: {exc}"[:300])
         cutoff = _aware(self.now())
@@ -1037,6 +1056,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 - [ ] **Step 1: Viết test fail** — trong `tests/test_domain_store.py`:
   - Đổi `test_store_uses_schema_version_three` thành `test_store_uses_schema_version_four`, assert `== 4`.
+  - Trong `test_existing_v2_database_migrates_to_v3`, đổi `assert migrated.schema_version() == 3` thành `assert migrated.schema_version() == 4` (vì Store mở lại sẽ chạy qua mọi migration lên phiên bản mới nhất).
   - Thêm vào cuối file:
 
 ```python
@@ -1098,7 +1118,7 @@ def test_a_version_three_database_migrates_to_four(tmp_path: Path):
 - [ ] **Step 2: Chạy để thấy fail**
 
 Run: `uv run pytest tests/test_domain_store.py -v`
-Expected: FAIL, vì `schema_version() == 3` và thiếu method `upsert_watchlist`.
+Expected: FAIL, vì `schema_version() == 3` (cả test version mới lẫn test migration) và thiếu method `upsert_watchlist`.
 
 - [ ] **Step 3: Sửa code**
 
@@ -1313,6 +1333,28 @@ def test_ticket_creation_refuses_a_research_decision_even_for_an_allowlisted_sym
         None,
         "research_only",
     )
+
+
+def test_bad_evidence_on_a_research_coin_is_no_trade_before_any_model_call(tmp_path: Path):
+    # A wrong CoinGecko map or a stale feed fails in builder.build, before the committee.
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    _watch(store)
+    committee = FakeCommittee()
+    service = CryptoDeskService(
+        settings,
+        store,
+        evidence_builder=FakeBuilder(error="Cross-source price deviation 1.20% exceeds 0.5%"),
+        committee=committee,
+        now=lambda: NOW,
+    )
+
+    result = service.analyze("NEARUSDT", research=True)
+
+    assert (result.decision.action, result.decision.decided) == ("NO_TRADE", False)
+    assert result.decision.research_only is True
+    assert result.ticket_id is None
+    assert committee.calls == 0
 ```
 
 Nếu file test chưa import `replace` và `pytest` thì thêm `from dataclasses import replace` và `import pytest`.
@@ -1432,22 +1474,111 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 7: `CryptoDeskService.scan()`
+### Task 7: `CryptoDeskService.scan()`: 10 pick vào watchlist, top 3 tự phân tích
 
 **Files:**
-- Modify: `src/crypto_desk/service.py`
-- Test: `tests/test_service_cli.py`
+- Modify: `src/crypto_desk/scanner.py`, `src/crypto_desk/store.py` (Step 0)
+- Modify: `src/crypto_desk/config.py`, `src/crypto_desk/service.py`
+- Test: `tests/test_scanner.py`, `tests/test_domain_store.py` (Step 0), `tests/test_service_cli.py`
 
 **Interfaces:**
 - Consumes:
   - `WatchlistScanner.run(exclude) -> ScanResult` (Task 4)
-  - `Store.upsert_watchlist`, `Store.set_watchlist_run` (Task 5)
+  - `Store.upsert_watchlist` (Task 5), `Store.latest_run` (có sẵn)
   - `analyze(..., research=True)` (Task 6)
 - Produces:
+  - `MAX_PICKS = WATCHLIST_MAX_ACTIVE` (10) trong `scanner.py`
+  - `AUTO_ANALYZE_PICKS = 3` trong `config.py`
   - `CryptoDeskService(..., scanner: Any | None = None)`
-  - `CryptoDeskService.scan() -> dict[str, Any]` gồm: `status` (`COMPLETED` hoặc `FAILED`), `scan_id`, `universe_size`, `dropped`, `picks: [{symbol, evidence_score, thesis, run_id, action}]`, `summary`, `error`, `artifact`.
+  - `CryptoDeskService.scan() -> dict[str, Any]` gồm: `status` (`COMPLETED` hoặc `FAILED`), `scan_id`, `universe_size`, `dropped`, `picks: [{symbol, evidence_score, thesis, run_id, action}]`, `summary`, `error`, `artifact`. `run_id` và `action` là `None` với pick chờ phân tích thủ công.
 
-- [ ] **Step 1: Viết test fail** — thêm vào cuối `tests/test_service_cli.py`:
+- [ ] **Step 0: Bù cho thiết kế 10 pick**
+
+Task 4–5 đã làm theo bản plan trước (3 pick). Làm từng mục dưới đây; mục nào code đã đúng thì bỏ qua.
+
+(a) `scanner.py`: gộp `WATCHLIST_MAX_ACTIVE` vào import từ `.config`, rồi thay `MAX_PICKS = 3` bằng:
+
+```python
+# A scan never picks more than the watchlist can show, so its picks always fit on screen.
+MAX_PICKS = WATCHLIST_MAX_ACTIVE
+```
+
+Trong `SCAN_ROLE`, thay hai dòng
+
+```python
+    f"thesis and return at most {MAX_PICKS} picks; return fewer, or none, when evidence is "
+    "weak. Strong evidence: ema20_above_ema50 true with price above EMA20; "
+```
+
+bằng
+
+```python
+    f"thesis and return at most {MAX_PICKS} picks, strongest first; return fewer, or none, "
+    "when evidence is weak. Strong evidence: ema20_above_ema50 true with price above EMA20; "
+```
+
+(b) `tests/test_scanner.py`:
+- Gộp `MAX_PICKS` vào import từ `crypto_desk.scanner`.
+- Trong parametrize của `test_ranking_fails_after_two_invalid_answers`, bỏ ca 4 lần `_pick("AUSDT")`. Với 10 pick nó chỉ còn là ca trùng, đã có ca riêng.
+- Thêm:
+
+```python
+def test_ranking_takes_up_to_max_picks():
+    symbols = [f"C{index:02d}USDT" for index in range(MAX_PICKS + 1)]
+    too_many = {"picks": [_pick(symbol) for symbol in symbols], "summary": "Eleven."}
+    llm = FakeScanLLM(too_many, {**too_many, "picks": too_many["picks"][:MAX_PICKS]})
+
+    ranking = rank_candidates(llm, _features(*symbols), model="flash", thinking="low")
+
+    assert MAX_PICKS == 10
+    assert len(ranking.picks) == MAX_PICKS
+    assert "failed validation" in llm.calls[1]["system_prompt"]
+```
+
+(c) `store.py`: một lượt quét ghi mọi pick với cùng `last_picked_at`, nên `ORDER BY last_picked_at` không xếp được chúng. Giữ nguyên chữ ký `active_watchlist` mà Task 5 đã làm, thay thân hàm bằng:
+
+```python
+        rows = self.db.execute("SELECT * FROM watchlist WHERE expires_at > ?", (now,)).fetchall()
+        entries = [self._watchlist_row(row) for row in rows]
+        # One scan writes every pick with the same last_picked_at; the score orders them.
+        entries.sort(
+            key=lambda entry: (
+                entry["last_picked_at"],
+                Decimal(str(entry["payload"].get("evidence_score", "0"))),
+            ),
+            reverse=True,
+        )
+        return entries[:limit]
+```
+
+Thêm vào `tests/test_domain_store.py`, dùng helper `_watch` của Task 5:
+
+```python
+def test_picks_of_one_scan_are_listed_by_score(tmp_path: Path):
+    store = Store(tmp_path / "crypto.db")
+    _watch(store, "OLDUSDT", "2026-09-25T00:00:00+00:00", "2026-10-02T00:00:00+00:00", "10")
+    _watch(store, "NINEUSDT", "2026-09-26T00:00:00+00:00", "2026-10-03T00:00:00+00:00", "9")
+    _watch(store, "TENUSDT", "2026-09-26T00:00:00+00:00", "2026-10-03T00:00:00+00:00", "10")
+
+    active = store.active_watchlist("2026-09-27T00:00:00+00:00", limit=2)
+
+    # Newest scan first, then score as a number: as text "9" would beat "10".
+    assert [entry["symbol"] for entry in active] == ["TENUSDT", "NINEUSDT"]
+```
+
+(d) Nếu Task 5 đã thêm `Store.set_watchlist_run` và test `test_watchlist_records_the_latest_research_run`, xoá cả hai. Run gần nhất của một đồng đọc từ `research_runs` (`latest_run`, `latest_valid_run`). Một `last_run_id` lưu trong watchlist sẽ lệch ngay khi người dùng phân tích thủ công.
+
+Chạy và commit riêng:
+
+```bash
+uv run pytest tests/test_scanner.py tests/test_domain_store.py -q && uv run pytest -q && uv run ruff check src tests
+git add src/crypto_desk/scanner.py src/crypto_desk/store.py tests/test_scanner.py tests/test_domain_store.py
+git commit -m "feat: let one scan fill the ten-entry watchlist, best score first
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+- [ ] **Step 1: Viết test fail** — thêm vào cuối `tests/test_service_cli.py`. Ranking 4 pick chỉ hợp lệ sau Step 0:
 
 ```python
 from crypto_desk.scanner import Candidate, ScanPick, ScanRanking, ScanResult
@@ -1463,35 +1594,40 @@ class FakeScanner:
         return self.result
 
 
-def _scan_result(*, error: str | None = None) -> ScanResult:
-    near = Candidate("NEARUSDT", "NEAR", "near", Decimal("160000000"))
+def _scan_result(*symbols: str, error: str | None = None) -> ScanResult:
+    universe = tuple(
+        Candidate(symbol, symbol[:-4], symbol[:-4].lower(), Decimal("160000000"))
+        for symbol in symbols
+    )
     ranking = (
         None
         if error
         else ScanRanking(
             picks=[
                 ScanPick(
-                    symbol="NEARUSDT",
-                    evidence_score=Decimal("8"),
+                    symbol=symbol,
+                    evidence_score=Decimal(9 - index),
                     thesis="Trend holds above support.",
                     supporting_fields=["support_distance_atr"],
                 )
+                for index, symbol in enumerate(symbols)
             ],
-            summary="One strong coin.",
+            summary="Ranked picks.",
         )
     )
-    return ScanResult((near,), {"AVAXUSDT": "EvidenceError: no klines"}, (), ranking, error)
+    return ScanResult(universe, {"ZECUSDT": "EvidenceError: no klines"}, (), ranking, error)
 
 
-def test_scan_adds_picks_to_the_watchlist_and_analyses_them_as_research(tmp_path: Path):
+def test_scan_watchlists_every_pick_but_analyses_only_the_top_three(tmp_path: Path):
     settings = make_settings(tmp_path)
     store = Store(settings.database)
-    scanner = FakeScanner(_scan_result())
+    scanner = FakeScanner(_scan_result("NEARUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"))
+    committee = FakeCommittee()
     service = CryptoDeskService(
         settings,
         store,
         evidence_builder=FakeBuilder(),
-        committee=FakeCommittee(),
+        committee=committee,
         scanner=scanner,
         now=lambda: NOW,
     )
@@ -1500,16 +1636,25 @@ def test_scan_adds_picks_to_the_watchlist_and_analyses_them_as_research(tmp_path
 
     assert result["status"] == "COMPLETED"
     assert scanner.excluded == frozenset(settings.symbols)
-    assert result["dropped"] == {"AVAXUSDT": "EvidenceError: no klines"}
-    pick = result["picks"][0]
-    assert (pick["symbol"], pick["action"]) == ("NEARUSDT", "ACCUMULATE")
-    entry = store.watchlist_entry("NEARUSDT")
-    assert entry["coingecko_id"] == "near"
-    assert entry["payload"]["last_run_id"] == pick["run_id"]
-    assert entry["expires_at"] == (NOW + timedelta(days=7)).isoformat()
+    assert result["dropped"] == {"ZECUSDT": "EvidenceError: no klines"}
+    assert committee.calls == 3
+    assert [(pick["symbol"], pick["action"]) for pick in result["picks"]] == [
+        ("NEARUSDT", "ACCUMULATE"),
+        ("AVAXUSDT", "ACCUMULATE"),
+        ("LINKUSDT", "ACCUMULATE"),
+        ("DOGEUSDT", None),
+    ]
+    # The fourth pick waits for a manual run: on the watchlist, never analysed.
+    assert result["picks"][3]["run_id"] is None
+    assert store.watchlist_entry("DOGEUSDT") is not None
+    assert store.latest_run("DOGEUSDT") is None
+    near = store.watchlist_entry("NEARUSDT")
+    assert near["coingecko_id"] == "near"
+    assert near["expires_at"] == (NOW + timedelta(days=7)).isoformat()
+    assert store.latest_run("NEARUSDT")["id"] == result["picks"][0]["run_id"]
     artifact = json.loads(Path(result["artifact"]).read_text(encoding="utf-8"))
-    assert artifact["ranking"]["picks"][0]["symbol"] == "NEARUSDT"
-    assert artifact["run_ids"] == [pick["run_id"]]
+    assert len(artifact["ranking"]["picks"]) == 4
+    assert artifact["run_ids"] == [pick["run_id"] for pick in result["picks"][:3]]
 
 
 def test_a_failed_scan_leaves_the_watchlist_unchanged(tmp_path: Path):
@@ -1520,7 +1665,7 @@ def test_a_failed_scan_leaves_the_watchlist_unchanged(tmp_path: Path):
         store,
         evidence_builder=FakeBuilder(),
         committee=FakeCommittee(),
-        scanner=FakeScanner(_scan_result(error="provider:rate_limit")),
+        scanner=FakeScanner(_scan_result("NEARUSDT", error="provider:rate_limit")),
         now=lambda: NOW,
     )
 
@@ -1543,13 +1688,30 @@ Expected: FAIL với `TypeError: ... unexpected keyword argument 'scanner'`.
 
 Trong `CryptoDeskService.__init__`: thêm keyword `scanner: Any | None = None` sau `execution`, và gán `self.scanner = scanner`.
 
-Import: `from .config import BENCHMARK_SYMBOL, REFLECTION_HORIZON_DAYS, WATCHLIST_TTL_DAYS, Settings`.
+`config.py`, ngay dưới `WATCHLIST_MAX_ACTIVE = 10`:
+
+```python
+# Only the best picks of a scan get a full committee; the rest wait for a manual run.
+AUTO_ANALYZE_PICKS = 3
+```
+
+Import trong `service.py`:
+
+```python
+from .config import (
+    AUTO_ANALYZE_PICKS,
+    BENCHMARK_SYMBOL,
+    REFLECTION_HORIZON_DAYS,
+    WATCHLIST_TTL_DAYS,
+    Settings,
+)
+```
 
 Thêm method sau `screen`:
 
 ```python
     def scan(self) -> dict[str, Any]:
-        """Quét bằng model rẻ, đưa pick vào watchlist, phân tích chúng ở chế độ nghiên cứu."""
+        """Đưa mọi pick của máy quét vào watchlist; chỉ các pick đầu được tự phân tích."""
         if self.scanner is None:
             raise ValueError("Watchlist scanner is required for scan")
         started = self._aware(self._now())
@@ -1559,7 +1721,7 @@ Thêm method sau `screen`:
         if result.ranking is not None:
             by_symbol = {candidate.symbol: candidate for candidate in result.universe}
             expires = iso(started + timedelta(days=WATCHLIST_TTL_DAYS))
-            for pick in result.ranking.picks:
+            for rank, pick in enumerate(result.ranking.picks):
                 self.store.upsert_watchlist(
                     pick.symbol,
                     by_symbol[pick.symbol].coingecko_id,
@@ -1572,17 +1734,19 @@ Thêm method sau `screen`:
                         "supporting_fields": list(pick.supporting_fields),
                     },
                 )
-                run = self.analyze(pick.symbol, research=True)
-                self.store.set_watchlist_run(pick.symbol, run.run_id)
-                picks.append(
-                    {
-                        "symbol": pick.symbol,
-                        "evidence_score": pick.evidence_score,
-                        "thesis": pick.thesis,
-                        "run_id": run.run_id,
-                        "action": run.decision.action,
-                    }
-                )
+                row: dict[str, Any] = {
+                    "symbol": pick.symbol,
+                    "evidence_score": pick.evidence_score,
+                    "thesis": pick.thesis,
+                    "run_id": None,
+                    "action": None,
+                }
+                # Picks come best first. Only the top ones spend a committee; the rest wait
+                # for `desk analyze SYMBOL --research`.
+                if rank < AUTO_ANALYZE_PICKS:
+                    run = self.analyze(pick.symbol, research=True)
+                    row.update(run_id=run.run_id, action=run.decision.action)
+                picks.append(row)
         artifact_path = (
             self.settings.artifacts / "scans" / started.date().isoformat() / f"{scan_id}.json"
         )
@@ -1597,7 +1761,7 @@ Thêm method sau `screen`:
                 "features": result.features,
                 "ranking": None if result.ranking is None else result.ranking.model_dump(mode="json"),
                 "error": result.error,
-                "run_ids": [pick["run_id"] for pick in picks],
+                "run_ids": [pick["run_id"] for pick in picks if pick["run_id"]],
             },
         )
         return {
@@ -1622,8 +1786,8 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/crypto_desk/service.py tests/test_service_cli.py
-git commit -m "feat: turn scan picks into watchlist research runs
+git add src/crypto_desk/config.py src/crypto_desk/service.py tests/test_service_cli.py
+git commit -m "feat: watchlist every scan pick and analyse the top three as research
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -1642,6 +1806,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Produces:
   - `save_reflection(..., cohort: str | None = None)` ghi `payload["cohort"]`.
   - `BenchmarkGroup.cohort: str`, với giá trị `"allowlist"` hoặc `"watchlist"`.
+
+- [ ] **Step 0: Bù test của Task 6**
+
+Nếu `tests/test_service_cli.py` chưa có `test_bad_evidence_on_a_research_coin_is_no_trade_before_any_model_call`, chép nó từ Step 1 của Task 6 vào cuối file. Code không cần đổi, test phải pass ngay. Nó đi chung commit của Task 8.
 
 - [ ] **Step 1: Viết test fail**
 
@@ -1797,7 +1965,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Consumes: `CryptoDeskService.scan()` (Task 7); `analyze(..., research=)` (Task 6); `WatchlistScanner` (Task 4); `Store.active_watchlist` (Task 5).
 - Produces: `_service(settings, *, broker=False, committee=True, execution=False, scanner=False)`. Các lệnh `desk scan`, `desk watchlist`, `desk analyze SYMBOL --research`.
 
-- [ ] **Step 1: Viết test fail** — thêm vào cuối `tests/test_service_cli.py`:
+- [ ] **Step 1: Viết test fail**
+
+Sửa fake sẵn có: trong `test_dashboard_hook_fires_after_analyze`, đổi `def analyze(self, symbol):` thành `def analyze(self, symbol, *, research=False):`. Lệnh `analyze` mới luôn truyền `research=`, nên fake cũ sẽ ném `TypeError`.
+
+Trong `test_public_commands_exist`, thêm `"scan"` và `"watchlist"` vào danh sách lệnh.
+
+Thêm vào cuối `tests/test_service_cli.py`:
 
 ```python
 def test_scan_command_runs_the_scanner_and_emits_the_result(tmp_path: Path, monkeypatch):
@@ -1840,6 +2014,38 @@ def test_analyze_research_flag_skips_the_allowlist_gate(tmp_path: Path, monkeypa
     assert calls == [("NEARUSDT", True)]
 
 
+def test_analyze_research_without_an_active_entry_fails_cleanly(tmp_path: Path, monkeypatch):
+    config = _write_config(tmp_path)
+
+    class _Service:
+        def analyze(self, symbol, *, research=False):
+            raise ValueError("Research analysis needs an active watchlist entry")
+
+    monkeypatch.setattr("crypto_desk.cli._service", lambda settings, **kwargs: _Service())
+
+    result = CliRunner().invoke(app, ["--config", str(config), "analyze", "OLDUSDT", "--research"])
+
+    # Exit code 2 from _fail, not 1 from an uncaught traceback.
+    assert result.exit_code == 2
+    assert "active watchlist entry" in result.output
+
+
+def test_scan_service_shares_one_model_client_and_one_public_client(tmp_path: Path, monkeypatch):
+    created: list[object] = []
+
+    def fake_client(settings):
+        created.append(object())
+        return created[-1]
+
+    monkeypatch.setattr("crypto_desk.cli._structured_client", fake_client)
+
+    service = _service(make_settings(tmp_path), scanner=True)
+
+    assert len(created) == 1
+    assert service.scanner.llm is service.committee.llm
+    assert service.scanner.client is service.evidence_builder.client
+
+
 def test_watchlist_command_lists_active_entries(tmp_path: Path):
     config = _write_config(tmp_path)
     store = Store(tmp_path / "crypto.sqlite3")
@@ -1857,15 +2063,17 @@ def test_watchlist_command_lists_active_entries(tmp_path: Path):
 
     assert result.exit_code == 0, result.stdout
     rows = json.loads(result.stdout)
-    assert [(row["symbol"], row["latest_action"]) for row in rows] == [("NEARUSDT", None)]
+    assert [(row["symbol"], row["latest_action"], row["latest_cutoff"]) for row in rows] == [
+        ("NEARUSDT", None, None)
+    ]
 ```
 
 `_write_config` ghi `database: <tmp>/crypto.sqlite3`, nên Store trong test phải mở đúng đường dẫn đó.
 
 - [ ] **Step 2: Chạy để thấy fail**
 
-Run: `uv run pytest tests/test_service_cli.py -k "scan_command or research_flag or watchlist_command" -v`
-Expected: FAIL, exit code 2 (chưa có lệnh `scan`, chưa có option `--research`).
+Run: `uv run pytest tests/test_service_cli.py -k "scan_command or research_flag or fails_cleanly or shares_one or watchlist_command or public_commands" -v`
+Expected: FAIL. Chưa có lệnh `scan`, `watchlist`, option `--research`, và `_service` chưa nhận `scanner`.
 
 - [ ] **Step 3: Sửa code**
 
@@ -1892,7 +2100,11 @@ def analyze(
     if not research and normalized not in settings.symbols:
         _fail("Symbol is outside the configured allowlist")
     service = _service(settings, broker=not research)
-    result = service.analyze(normalized, research=research)
+    try:
+        result = service.analyze(normalized, research=research)
+    except ValueError as exc:
+        # A missing or expired watchlist entry is an operator error, not a crash.
+        _fail(str(exc))
     _publish_dashboard_if_configured(settings)
     _emit(ctx, result)
 ```
@@ -1902,7 +2114,7 @@ Thêm hai lệnh, ngay sau `analyze`:
 ```python
 @app.command()
 def scan(ctx: typer.Context) -> None:
-    """Quét top 30 cặp USDT bằng model rẻ, đưa tối đa 3 đồng vào watchlist nghiên cứu."""
+    """Quét top 30 cặp USDT bằng model rẻ: tối đa 10 đồng vào watchlist, top 3 tự phân tích."""
     settings = _load(ctx)
     result = _service(settings, scanner=True).scan()
     _publish_dashboard_if_configured(settings)
@@ -1911,7 +2123,7 @@ def scan(ctx: typer.Context) -> None:
 
 @app.command()
 def watchlist(ctx: typer.Context) -> None:
-    """Watchlist nghiên cứu còn hạn, kèm quyết định committee gần nhất."""
+    """Watchlist nghiên cứu còn hạn, kèm quyết định committee gần nhất và thời điểm của nó."""
     settings = _load(ctx)
     store = Store(settings.database)
     try:
@@ -1919,7 +2131,11 @@ def watchlist(ctx: typer.Context) -> None:
         for entry in store.active_watchlist(iso(_utcnow()), WATCHLIST_MAX_ACTIVE):
             latest = store.latest_valid_run(entry["symbol"])
             rows.append(
-                {**entry, "latest_action": latest["decision"]["action"] if latest else None}
+                {
+                    **entry,
+                    "latest_action": latest["decision"]["action"] if latest else None,
+                    "latest_cutoff": latest["cutoff"] if latest else None,
+                }
             )
     finally:
         store.close()
@@ -1928,23 +2144,73 @@ def watchlist(ctx: typer.Context) -> None:
 
 `iso` phải được import từ `.domain` nếu `cli.py` chưa có.
 
-`_service`: thêm keyword `scanner: bool = False`. Tạo scanner trước `return CryptoDeskService(...)`, và truyền `scanner=selected_scanner` vào lời gọi đó:
+`_service`: thay cả hàm bằng bản dưới. Committee và máy quét dùng chung một model client, vì khoảng cách tối thiểu giữa hai request của Gemini (`GEMINI_MIN_REQUEST_INTERVAL_SECONDS`) tính theo từng client. Máy quét cũng dùng chung public client với evidence builder.
 
 ```python
+def _service(
+    settings: Settings,
+    *,
+    broker: bool = False,
+    committee: bool = True,
+    execution: bool = False,
+    scanner: bool = False,
+) -> CryptoDeskService:
+    store = Store(settings.database)
+    public = PublicDataClient(settings.news_feeds)
+    evidence_builder = EvidenceBuilder(public, settings.coingecko_ids)
+    selected_broker = None
+    if broker:
+        try:
+            selected_broker = _broker(settings)
+        except (ValueError, BrokerError):
+            if execution:
+                raise
+            selected_broker = None
+    # One model client: Gemini spaces requests per client, so a second client would let the
+    # scan call and the first committee call land back to back.
+    llm = _structured_client(settings) if committee or scanner else None
+    selected_committee = None
+    if committee:
+        selected_committee = CryptoCommittee(
+            llm,
+            provider=settings.models.provider,
+            quick_model=settings.models.quick,
+            deep_model=settings.models.deep,
+            quick_thinking=settings.models.quick_thinking,
+            deep_thinking=settings.models.deep_thinking,
+            debate_rounds=settings.models.debate_rounds,
+        )
+    selected_execution = None
+    if execution:
+        assert selected_broker is not None
+        selected_execution = ExecutionService(
+            store,
+            selected_broker,
+            settings,
+        )
     selected_scanner = None
     if scanner:
         selected_scanner = WatchlistScanner(
-            PublicDataClient(settings.news_feeds),
-            _structured_client(settings),
+            public,
+            llm,
             model=settings.models.quick,
             thinking=settings.models.quick_thinking,
         )
+    return CryptoDeskService(
+        settings,
+        store,
+        broker=selected_broker,
+        evidence_builder=evidence_builder,
+        committee=selected_committee,
+        execution=selected_execution,
+        scanner=selected_scanner,
+    )
 ```
 
 - [ ] **Step 4: Chạy test**
 
 Run: `uv run pytest tests/test_service_cli.py -v && uv run pytest -q && uv run ruff check src tests`
-Expected: PASS. Có một test sẵn có kiểm tra danh sách lệnh public (`test_public_commands_exist`); nếu nó liệt kê cố định các lệnh thì thêm `scan` và `watchlist` vào danh sách đó.
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -2303,6 +2569,7 @@ Expected: PASS toàn bộ unit test. Test cũ vẫn xanh, vì payload thiếu `w
 
 ```tsx
 import type { DashboardWatchlistEntry } from "../lib/dashboard-contract";
+import { formatVietnamDateTime } from "../lib/date-format";
 import { CoinIcon, MiniSparkline } from "./coin-icon";
 
 function grossRiskReward(entry: string | null, stop: string | null, target: string | null) {
@@ -2316,6 +2583,7 @@ export function ResearchWatchlist({ entries }: { entries: DashboardWatchlistEntr
   return (
     <div className="watchlist-table-panel" aria-label="Watchlist nghiên cứu">
       <h3 className="watchlist-section-title">Watchlist nghiên cứu — không giao dịch</h3>
+      <p>Top 3 được committee tự phân tích; đồng khác chạy `desk analyze SYMBOL --research`.</p>
       <table className="watchlist-full-table">
         <thead>
           <tr>
@@ -2348,7 +2616,16 @@ export function ResearchWatchlist({ entries }: { entries: DashboardWatchlistEntr
                 </td>
                 <td>{item.evidence_score}/10</td>
                 <td>
-                  {decision ? `${decision.action} · ${decision.conviction}/10` : "Chưa phân tích"}
+                  {decision ? (
+                    <>
+                      {`${decision.action} · ${decision.conviction}/10`}
+                      <br />
+                      {/* A manual coin may still carry a decision from an earlier pick. */}
+                      <small>{formatVietnamDateTime(decision.cutoff)}</small>
+                    </>
+                  ) : (
+                    "Chờ phân tích thủ công"
+                  )}
                 </td>
                 <td>
                   {decision && decision.entry !== null
@@ -2420,11 +2697,13 @@ Thêm đoạn giải thích ngay dưới đoạn về `desk scorecard`:
 
 ```markdown
 `desk scan` quét top 30 cặp USDT (có futures USDⓈ-M, CoinGecko id, OCO/OTO, volume ≥ 20M
-USDT, ngoài allowlist). Code tính bảng chỉ số, Gemini Flash (`models.quick`) chọn tối đa 3
-đồng có evidence mạnh cho thesis Spot long 20 ngày. Các đồng này vào watchlist 7 ngày và
-được committee phân tích ở chế độ **nghiên cứu**: không bao giờ tạo ticket, và được chấm
-thành nhóm `watchlist` riêng trong scorecard. Muốn giao dịch một đồng thì tự thêm nó vào
-allowlist.
+USDT, ngoài allowlist). Code tính bảng chỉ số, Gemini Flash (`models.quick`) chọn tối đa 10
+đồng có evidence mạnh cho thesis Spot long 20 ngày. Cả 10 đồng vào watchlist 7 ngày;
+committee tự phân tích 3 đồng điểm cao nhất, đồng còn lại chạy tay bằng
+`desk analyze SYMBOL --research`. Run nghiên cứu không bao giờ tạo ticket và được chấm
+thành nhóm `watchlist` riêng trong scorecard. Muốn giao dịch một đồng thì phải sửa code:
+thêm nó vào `V1_SYMBOLS`, `coingecko_ids` và `KNOWN_SYMBOLS` của web, rồi mới đưa vào
+`symbols` trong config.
 ```
 
 - [ ] **Step 2: Chạy toàn bộ và commit**
@@ -2438,18 +2717,21 @@ git commit -m "docs: document desk scan and the research watchlist
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-- [ ] **Step 3: Chạy thật (thủ công; gọi API public và khoảng 31 lần gọi Gemini)**
+- [ ] **Step 3: Chạy thật (thủ công; gọi API public và khoảng 31 lần gọi Gemini: 1 Flash + 3 committee)**
 
 Run: `uv run desk --config config.yaml --json scan`
 Expected:
-- `status: COMPLETED`, `universe_size` khoảng 25–30.
-- Tối đa 3 pick, mỗi pick có `run_id`.
-- `desk watchlist` liệt kê các pick đó.
+- `status: COMPLETED`. `universe_size` khoảng 20–30 (lúc viết plan là 22).
+- Tối đa 10 pick. Đúng `min(3, số pick)` pick đầu có `run_id`; các pick còn lại có `run_id: null`.
+- `desk watchlist` liệt kê mọi pick; đồng chưa phân tích có `latest_action: null`.
 - Không có `ticket_*` mới: `desk --json tickets` không đổi.
 - Mỗi run có `ticket_blocked.json` với lý do `research_only` khi action là ACCUMULATE.
+
+Sau đó chạy tay một pick không được tự phân tích (khoảng 10 lần gọi Gemini):
+`uv run desk --config config.yaml --json analyze <SYMBOL> --research`. Kết quả phải có `run_id`, không có ticket, và `desk watchlist` hiện `latest_action` của đồng đó.
 
 Nếu `status: FAILED`, đọc `error` trong artifact và báo lại, không tự sửa prompt hay code.
 
 ## Ngoài phạm vi
 
-Giữ đúng mục "Ngoài phạm vi" của spec: lịch tự động, nút quét trên dashboard, tự đưa đồng vào allowlist, percentile top trader, VN.
+Giữ đúng mục "Ngoài phạm vi" của spec: lịch tự động, nút quét và nút phân tích watchlist trên dashboard, tự lấy pick thứ 4 bù khi top 3 lỗi evidence, hạ ngưỡng volume xuống 10M, tự đưa đồng vào allowlist, percentile top trader, VN.

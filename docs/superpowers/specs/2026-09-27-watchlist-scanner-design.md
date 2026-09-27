@@ -4,15 +4,16 @@
 
 ## Mục tiêu
 
-Tìm các đồng ngoài allowlist có evidence mạnh cho một thesis Spot long 20 ngày, đưa chúng vào watchlist, phân tích bằng committee đầy đủ, rồi chấm điểm riêng để biết máy quét chọn có tốt không. Toàn bộ **chỉ phục vụ nghiên cứu**: watchlist không bao giờ sinh ticket hay lệnh.
+Tìm tối đa 10 đồng ngoài allowlist có evidence mạnh cho một thesis Spot long 20 ngày và đưa vào watchlist. Committee đầy đủ tự chạy cho 3 đồng điểm cao nhất; 7 đồng còn lại người dùng tự chọn phân tích bằng `desk analyze SYMBOL --research`. Mọi run nghiên cứu được chấm điểm riêng để biết máy quét chọn có tốt không. Toàn bộ **chỉ phục vụ nghiên cứu**: watchlist không bao giờ sinh ticket hay lệnh.
 
 ## Quyết định đã chốt với người dùng
 
 | Câu hỏi | Chốt |
 |---|---|
-| Đồng tìm được dùng để làm gì | Chỉ nghiên cứu. Allowlist 5 đồng giữ nguyên; muốn giao dịch đồng nào thì người dùng tự thêm vào allowlist sau |
+| Đồng tìm được dùng để làm gì | Chỉ nghiên cứu. Allowlist 5 đồng giữ nguyên. Muốn giao dịch đồng nào thì phải sửa code (`V1_SYMBOLS`, `coingecko_ids`, `KNOWN_SYMBOLS` của web) rồi mới thêm vào `symbols` |
 | Phạm vi quét | Tự động top 30 cặp USDT theo volume 24h, đã lọc |
-| Ngân sách | Tối đa 3 đồng mỗi lần quét vào committee đầy đủ |
+| Ngân sách | Flash chọn tối đa 10 đồng vào watchlist; committee tự chạy cho 3 đồng điểm cao nhất |
+| 7 đồng còn lại | Người dùng tự phân tích từng đồng bằng `desk analyze SYMBOL --research` |
 | Lịch chạy | Chỉ lệnh tay (`desk scan`) |
 | Hiển thị | CLI, report.md, và mục watchlist trên dashboard |
 | Cách quét | Hướng A: code tính chỉ số, Gemini Flash xếp hạng cả bảng trong 1 lần gọi |
@@ -20,9 +21,9 @@ Tìm các đồng ngoài allowlist có evidence mạnh cho một thesis Spot lon
 ## Bất biến
 
 1. Run nghiên cứu **không bao giờ** tạo ticket. Có ba lớp chặn độc lập:
-   - `analyze(research=True)` không gọi `_create_ticket`;
-   - `_create_ticket` từ chối mọi decision có `research_only` hoặc symbol ngoài allowlist;
-   - `_pre_submit` của execution vẫn từ chối symbol ngoài allowlist (đã có).
+   - `_create_ticket` từ chối mọi decision có `research_only` (do `analyze(research=True)` đánh dấu) hoặc symbol ngoài allowlist;
+   - `_pre_submit` của execution vẫn từ chối symbol ngoài allowlist (đã có);
+   - `_validate_symbol` của broker từ chối symbol ngoài `V1_SYMBOLS` (đã có).
 2. `V1_SYMBOLS`, `settings.symbols` và đường thực thi không đổi.
 3. Mọi con số trong bảng quét do code tính. Model chỉ xếp hạng và giải thích, không được đưa ra số mới.
 4. Lượt quét lỗi (khám phá phạm vi hoặc xếp hạng) giữ nguyên watchlist.
@@ -59,9 +60,11 @@ Một đồng được giữ khi thoả **tất cả**:
 
 Sắp xếp theo `quoteVolume` giảm dần, lấy `UNIVERSE_SIZE = 30`.
 
+Đo ngày 27/09: bộ lọc trên cho 22 đồng, chưa chạm mức 30. Hạ `quoteVolume` xuống 10 000 000 thì đủ 30.
+
 ### 1.2 Tính chỉ số (khoảng 4 request mỗi đồng, cộng 1 request dùng chung)
 
-- **Dùng chung cho tất cả:** `GET /fapi/v1/premiumIndex` không truyền symbol, trả funding của mọi đồng.
+- **Dùng chung cho tất cả:** `GET /fapi/v1/premiumIndex` không truyền symbol, trả funding của mọi đồng. Funding được đọc riêng cho từng đồng, nên một dòng hỏng chỉ loại đồng của nó.
 - **Mỗi đồng:**
   - nến ngày `limit=121`, chỉ giữ nến đã đóng;
   - `openInterestHist` 1h × 25;
@@ -94,13 +97,13 @@ Sắp xếp theo `quoteVolume` giảm dần, lấy `UNIVERSE_SIZE = 30`.
   - khoảng trống tới kháng cự so với khoảng cách xuống hỗ trợ tính bằng ATR, tức có khả năng đạt R:R ≥ 1.5 với stop ≥ 1 ATR ngày;
   - vị thế không crowded theo percentile;
   - dòng tiền 24h ủng hộ;
-  - chọn **tối đa 3, được phép 0**.
+  - chọn **tối đa 10, mạnh nhất trước, được phép ít hơn hoặc 0**.
 - **Payload:** `{"horizon_days": 20, "fields": {tên: mô tả}, "candidates": [ScanFeatures...]}`.
 - **Schema:**
   - `ScanPick`: `symbol`, `evidence_score` (0–10), `thesis` (≤ 400 ký tự), `supporting_fields` (1–6 tên trường).
-  - `ScanRanking`: `picks` (≤ 3), `summary` (≤ 600 ký tự).
+  - `ScanRanking`: `picks` (≤ 10), `summary` (≤ 600 ký tự).
 - **Code kiểm tra:** symbol phải có trong `candidates`, không trùng, `supporting_fields` là tên trường có thật. Sai thì thử lại 1 lần kèm lý do; vẫn sai hoặc provider lỗi thì lượt quét dừng với lỗi. Artifact bảng chỉ số vẫn được ghi để chẩn đoán.
-- Picks được sắp theo `evidence_score` giảm dần.
+- Picks được sắp theo `evidence_score` giảm dần; điểm bằng nhau giữ thứ tự model trả về.
 
 ### 1.4 Artifact
 
@@ -118,7 +121,7 @@ CREATE TABLE IF NOT EXISTS watchlist (
   last_picked_at TEXT NOT NULL,
   expires_at TEXT NOT NULL,
   scan_id TEXT NOT NULL,
-  payload TEXT NOT NULL   -- {"evidence_score", "thesis", "supporting_fields", "last_run_id"}
+  payload TEXT NOT NULL   -- {"evidence_score", "thesis", "supporting_fields"}
 );
 ```
 
@@ -126,18 +129,25 @@ Migration theo đúng mẫu v2/v3 hiện có (`version < 4`).
 
 Methods:
 - `upsert_watchlist(symbol, coingecko_id, scan_id, picked_at, expires_at, payload)`: giữ `first_added_at` cũ.
-- `set_watchlist_run(symbol, run_id)`.
-- `active_watchlist(now)`: `expires_at > now`, sắp theo `last_picked_at` giảm dần, `LIMIT 10`.
+- `active_watchlist(now, limit)`: `expires_at > now`, sắp theo `last_picked_at` giảm dần rồi `evidence_score` giảm dần (các pick của một lượt quét có cùng `last_picked_at`), lấy `limit` hàng đầu.
 - `watchlist_entry(symbol)`.
 - `watchlist_symbols()`: mọi symbol từng có trong bảng. Hàng hết hạn **không bị xoá**, vì reflection vẫn cần chấm chúng.
 
-Hằng số: `WATCHLIST_TTL_DAYS = 7`, `WATCHLIST_MAX_ACTIVE = 10`. Một đồng được chọn lại thì làm mới hạn, điểm và thesis.
+Run gần nhất của một đồng đọc từ `research_runs` (`latest_run`, `latest_valid_run`), không lưu lại trong watchlist. Lưu lại thì sẽ lệch ngay khi người dùng phân tích thủ công.
+
+Hằng số:
+- `WATCHLIST_TTL_DAYS = 7`.
+- `WATCHLIST_MAX_ACTIVE = 10`: số entry tối đa CLI và dashboard hiển thị. `MAX_PICKS` của máy quét lấy đúng giá trị này, nên pick của lượt mới nhất luôn hiện đủ.
+- `AUTO_ANALYZE_PICKS = 3`.
+
+Một đồng được chọn lại thì làm mới hạn, điểm và thesis.
 
 ### 2.2 `CryptoDeskService.scan()`
 
 1. Gọi scanner. Lỗi thì ghi artifact có `error` và trả `{"status": "FAILED", ...}`.
-2. Với mỗi pick: upsert watchlist, rồi `analyze(pick.symbol, research=True)`, rồi `set_watchlist_run`.
-3. Ghi artifact, trả `{"status": "COMPLETED", scan_id, universe_size, dropped, picks: [{symbol, score, thesis, run_id, action}]}`.
+2. Upsert **mọi** pick vào watchlist.
+3. Chỉ `AUTO_ANALYZE_PICKS = 3` pick đầu (điểm cao nhất) được `analyze(pick.symbol, research=True)`. Các pick còn lại chờ người dùng chạy `desk analyze SYMBOL --research`.
+4. Ghi artifact, trả `{"status": "COMPLETED", scan_id, universe_size, dropped, picks: [{symbol, evidence_score, thesis, run_id, action}]}`. `run_id` và `action` là `null` với pick chờ phân tích thủ công.
 
 ### 2.3 Phân tích nghiên cứu: `analyze(symbol, cutoff=None, *, research=False)`
 
@@ -160,8 +170,8 @@ Hằng số: `WATCHLIST_TTL_DAYS = 7`, `WATCHLIST_MAX_ACTIVE = 10`. Một đồn
 ### 2.5 CLI
 
 - `desk scan`: in JSON (`--json`) hoặc bảng gọn.
-- `desk watchlist`: liệt kê entry còn hạn cùng quyết định committee gần nhất.
-- `desk analyze SYMBOL --research`: phân tích lại một entry còn hạn.
+- `desk watchlist`: liệt kê entry còn hạn cùng quyết định committee gần nhất và thời điểm của nó (`null` khi chưa phân tích).
+- `desk analyze SYMBOL --research`: phân tích thủ công một entry còn hạn (một trong 7 đồng không được tự chạy, hoặc chạy lại). Entry không có hoặc đã hết hạn thì báo lỗi gọn, exit code 2, không in traceback.
 
 ## Phần 3 — Dashboard, xử lý lỗi, kiểm thử
 
@@ -177,7 +187,8 @@ Hằng số: `WATCHLIST_TTL_DAYS = 7`, `WATCHLIST_MAX_ACTIVE = 10`. Một đồn
     - symbol theo regex `^[A-Z0-9]{2,20}USDT$`;
     - tối đa 10 entry;
     - trường văn bản bị giới hạn độ dài như các trường hiện có.
-  - `watchlist-view` thêm nhóm "Watchlist nghiên cứu — không giao dịch" hiển thị điểm, thesis, action, conviction, entry/stop/target và R:R.
+  - `watchlist-view` thêm nhóm "Watchlist nghiên cứu — không giao dịch" hiển thị điểm, thesis, action, conviction, thời điểm quyết định, entry/stop/target và R:R.
+  - Đồng chưa có run hiện "Chờ phân tích thủ công". Đồng thủ công có thể mang quyết định cũ từ lần chọn trước, nên luôn hiện thời điểm quyết định.
   - Không có nút analyze. Icon dùng avatar chung cho symbol lạ.
   - `KNOWN_SYMBOLS` không đổi.
 - **Thứ tự deploy:** parser web bỏ qua key top-level không biết, nên Python ra trước không làm vỡ web cũ. Web do người dùng deploy (Cloudflare).
@@ -191,21 +202,30 @@ Hằng số: `WATCHLIST_TTL_DAYS = 7`, `WATCHLIST_MAX_ACTIVE = 10`. Một đồn
 | Ít hơn 1 candidate sau lọc | `COMPLETED` với 0 pick |
 | Xếp hạng không hợp lệ 2 lần, hoặc provider lỗi | `FAILED`, artifact có `features` và `error` |
 | Model chọn 0 đồng | `COMPLETED`, không phân tích gì |
-| Committee của một pick lỗi | Run ghi NO_TRADE undecided như hiện tại; entry vẫn nằm trong watchlist kèm `last_run_id` |
+| Pick thứ 4 trở đi | Vào watchlist, không có run, không tốn lượt gọi model |
+| Pick top 3 lỗi evidence (lệch giá, thiếu tin…) | Run NO_TRADE undecided. Lỗi dừng ở `builder.build`, trước mọi lời gọi model. Không tự lấy pick thứ 4 bù |
+| Committee của một pick lỗi | Run ghi NO_TRADE undecided như hiện tại; entry vẫn nằm trong watchlist |
+| Phân tích thủ công một entry hết hạn | Báo lỗi gọn, exit code 2 |
 
 ### 3.3 Kiểm thử
 
 - **Khám phá phạm vi:** fixture 4 response; kiểm tra từng bộ lọc (stable, không futures, không OCO/OTO, không CoinGecko id, volume thấp, allowlist), map CoinGecko theo vốn hoá, cắt top 30.
 - **Chỉ số:** nến tổng hợp có giá trị biết trước. Kiểm tra `range_position`, khoảng cách ATR, `resistance_distance_atr = None` khi không còn kháng cự, và đồng lỗi dữ liệu thì bị loại.
-- **Xếp hạng:** chấp nhận đầu ra hợp lệ; thử lại khi symbol lạ, trùng, quá 3 pick hoặc trường không tồn tại; `FAILED` sau 2 lần sai; 0 pick hợp lệ.
-- **Store:** migration v3→v4 trên DB có dữ liệu; upsert giữ `first_added_at`; hết hạn; `LIMIT 10`.
+- **Xếp hạng:** chấp nhận đầu ra hợp lệ; thử lại khi symbol lạ, trùng, quá 10 pick hoặc trường không tồn tại; `FAILED` sau 2 lần sai; 0 pick hợp lệ.
+- **Quét:** một dòng funding hỏng không làm hỏng lượt quét.
+- **Store:** migration v3→v4 trên DB có dữ liệu; upsert giữ `first_added_at`; hết hạn; thứ tự theo lượt chọn rồi theo điểm (so sánh số, không so chuỗi); cắt theo `limit`.
 - **Nghiên cứu:**
   - symbol ngoài allowlist chỉ phân tích được khi có entry còn hạn;
   - không bao giờ có ticket kể cả khi ACCUMULATE;
   - `position_quantity = 0`;
-  - `_create_ticket` từ chối decision `research_only`.
+  - `_create_ticket` từ chối decision `research_only`;
+  - evidence lỗi ra NO_TRADE và không gọi committee.
+- **`scan()`:** mọi pick vào watchlist; chỉ 3 pick đầu được phân tích; pick còn lại có `run_id = null`.
 - **Reflection/scorecard:** run nghiên cứu được chấm với `cohort = watchlist`; scorecard tách hai nhóm; hàng cũ vào nhóm `allowlist`.
-- **CLI:** `scan`, `watchlist`, `analyze --research` (service được thay bằng fake).
+- **CLI:**
+  - `scan`, `watchlist`, `analyze --research` (service được thay bằng fake);
+  - `analyze --research` không có entry thì exit code 2;
+  - `desk scan` dùng một model client và một public client chung cho committee và máy quét.
 - **Dashboard:** snapshot có `watchlist`. Web unit test cho parser: hợp lệ; thiếu trường `watchlist`; symbol sai; vượt 10.
 - **Live smoke** (thủ công, chỉ đọc): `desk scan` một lần.
 
@@ -213,6 +233,9 @@ Hằng số: `WATCHLIST_TTL_DAYS = 7`, `WATCHLIST_MAX_ACTIVE = 10`. Một đồn
 
 - **Tự chạy theo lịch:** khi người dùng muốn; hiện chỉ lệnh tay.
 - **Nút quét trên dashboard:** khi luồng CLI đã ổn định.
+- **Nút phân tích watchlist trên dashboard:** khi chạy CLI cho 7 đồng thủ công thấy bất tiện.
+- **Tự lấy pick thứ 4 bù khi một đồng top 3 lỗi evidence:** khi chuyện này hay xảy ra.
+- **Hạ ngưỡng volume xuống 10M để đủ 30 ứng viên:** khi muốn Flash chọn 10 đồng từ một nhóm rộng hơn 22.
 - **Tự đưa đồng vào allowlist:** luôn để người dùng quyết.
 - **Percentile top trader trong bảng quét:** thêm 1 request/đồng, khi scorecard watchlist cho thấy cần.
 - **VN:** không áp dụng.
