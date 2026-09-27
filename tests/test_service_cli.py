@@ -97,8 +97,10 @@ class FakeBuilder:
         cutoff: datetime,
         *,
         live: bool = False,
+        coingecko_id: str | None = None,
     ) -> EvidenceSnapshot:
         self.calls.append(symbol)
+        self.coingecko_ids_seen = getattr(self, "coingecko_ids_seen", []) + [coingecko_id]
         if self.error:
             raise EvidenceError(self.error)
         return make_snapshot(symbol)
@@ -128,6 +130,7 @@ class FakeCommittee:
         position_quantity=Decimal("0"),
     ):
         self.calls += 1
+        self.last_position_quantity = position_quantity
         self.last_prior_thesis = prior_thesis
         decision = ResearchDecision(
             symbol=snapshot.symbol,
@@ -2273,3 +2276,84 @@ def test_reflection_waits_for_the_twentieth_daily_candle_to_close(tmp_path: Path
 
     assert service.refresh_reflections(NOW) == []
     assert service.refresh_reflections(NOW + timedelta(days=1)) == ["young-run"]
+
+
+def _watch(store: Store, symbol: str = "NEARUSDT", *, expires: datetime | None = None) -> None:
+    store.upsert_watchlist(
+        symbol,
+        "near",
+        "scan-1",
+        NOW.isoformat(),
+        (expires or NOW + timedelta(days=7)).isoformat(),
+        {"evidence_score": "8", "thesis": "Trend holds.", "supporting_fields": ["change_20d_pct"]},
+    )
+
+
+def test_research_analysis_of_a_watchlisted_coin_never_mints_a_ticket(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    store.save_snapshot(
+        PortfolioSnapshot(
+            environment="testnet",
+            nav_usdt=Decimal("10000"),
+            free_usdt=Decimal("10000"),
+            positions=(),
+            open_orders=(),
+            as_of=NOW.isoformat(),
+        )
+    )
+    _watch(store)
+    builder, committee = FakeBuilder(), FakeCommittee()
+    service = CryptoDeskService(
+        settings, store, evidence_builder=builder, committee=committee, now=lambda: NOW
+    )
+
+    result = service.analyze("NEARUSDT", research=True)
+
+    assert result.decision.action == "ACCUMULATE"
+    assert result.decision.research_only is True
+    assert result.ticket_id is None
+    blocked = json.loads((result.report_dir / "ticket_blocked.json").read_text(encoding="utf-8"))
+    assert blocked["reason"] == "research_only"
+    assert builder.coingecko_ids_seen == ["near"]
+    assert committee.last_position_quantity == Decimal("0")
+    assert "NGHIÊN CỨU — không giao dịch" in (result.report_dir / "report.md").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_research_analysis_needs_an_active_watchlist_entry(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    _watch(store, "OLDUSDT", expires=NOW - timedelta(minutes=1))
+    service = CryptoDeskService(
+        settings, store, evidence_builder=FakeBuilder(), committee=FakeCommittee(), now=lambda: NOW
+    )
+
+    for symbol in ("NEARUSDT", "OLDUSDT"):
+        with pytest.raises(ValueError, match="active watchlist entry"):
+            service.analyze(symbol, research=True)
+
+
+def test_an_allowlisted_symbol_cannot_be_analysed_as_research(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    _watch(store, "BTCUSDT")
+    service = CryptoDeskService(
+        settings, store, evidence_builder=FakeBuilder(), committee=FakeCommittee(), now=lambda: NOW
+    )
+
+    with pytest.raises(ValueError, match="active watchlist entry"):
+        service.analyze("BTCUSDT", research=True)
+
+
+def test_ticket_creation_refuses_a_research_decision_even_for_an_allowlisted_symbol(tmp_path):
+    settings = make_settings(tmp_path)
+    service = CryptoDeskService(settings, Store(settings.database), now=lambda: NOW)
+    decision = replace(FakeCommittee().run(make_snapshot("BTCUSDT")).decision, research_only=True)
+
+    assert service._create_ticket(decision, make_snapshot("BTCUSDT"), NOW) == (
+        None,
+        "research_only",
+    )
+

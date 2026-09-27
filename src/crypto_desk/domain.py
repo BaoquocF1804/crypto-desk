@@ -184,6 +184,8 @@ class ResearchDecision:
     thesis_continuity: ThesisContinuity = "NEW"
     prior_run_id: str | None = None
     decided: bool = True
+    # From the watchlist scanner: analysed for research, never tradable.
+    research_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)

@@ -103,9 +103,19 @@ class CryptoDeskService:
         self,
         symbol: str,
         cutoff: datetime | None = None,
+        *,
+        research: bool = False,
     ) -> AnalysisRun:
         symbol = symbol.upper()
-        if symbol not in self.settings.symbols:
+        build_kwargs: dict[str, Any] = {}
+        if research:
+            entry = self._active_watchlist_entry(symbol)
+            if entry is None:
+                raise ValueError(
+                    "Research analysis needs an active watchlist entry outside the allowlist"
+                )
+            build_kwargs["coingecko_id"] = entry["coingecko_id"]
+        elif symbol not in self.settings.symbols:
             raise ValueError("Symbol is outside the configured allowlist")
         builder = self._require_builder()
         effective_cutoff = self._aware(cutoff or self._now())
@@ -122,7 +132,7 @@ class CryptoDeskService:
         evidence_payload: Any
         prior_thesis, prior_run_id = self._build_prior_thesis(symbol, None, effective_cutoff)
         try:
-            snapshot = builder.build(symbol, effective_cutoff, live=cutoff is None)
+            snapshot = builder.build(symbol, effective_cutoff, live=cutoff is None, **build_kwargs)
         except EvidenceError as exc:
             decision = self._no_trade(symbol, str(exc), prior_run_id=prior_run_id)
             evidence_payload = {
@@ -143,6 +153,8 @@ class CryptoDeskService:
             prior_thesis, prior_run_id = self._build_prior_thesis(
                 symbol, snapshot, effective_cutoff
             )
+            # A research coin is never held by the desk, whatever the account shows.
+            position_quantity = Decimal("0") if research else self._position_quantity(symbol)
             committee = self._require_committee()
             reflections = prompt_reflections(self.store.list_reflections(symbol))
             try:
@@ -151,14 +163,14 @@ class CryptoDeskService:
                         snapshot,
                         reflections=reflections,
                         prior_thesis=prior_thesis,
-                        position_quantity=self._position_quantity(symbol),
+                        position_quantity=position_quantity,
                     )
                 except TypeError as exc:
                     if "prior_thesis" in str(exc):
                         committee_result = committee.run(
                             snapshot,
                             reflections=reflections,
-                            position_quantity=self._position_quantity(symbol),
+                            position_quantity=position_quantity,
                         )
                     else:
                         raise
@@ -173,6 +185,9 @@ class CryptoDeskService:
                     f"committee:{type(exc).__name__}",
                     prior_run_id=prior_run_id,
                 )
+
+        if research:
+            decision = replace(decision, research_only=True)
 
         run_id = str(uuid.uuid4())
         report_dir = self.settings.artifacts / effective_cutoff.date().isoformat() / run_id
@@ -578,6 +593,12 @@ class CryptoDeskService:
             Decimal("0"),
         )
 
+    def _active_watchlist_entry(self, symbol: str) -> dict[str, Any] | None:
+        entry = self.store.watchlist_entry(symbol)
+        if entry is None or symbol in self.settings.symbols:
+            return None
+        return entry if entry["expires_at"] > iso(self._now()) else None
+
     def _create_ticket(
         self,
         decision: ResearchDecision,
@@ -586,6 +607,9 @@ class CryptoDeskService:
     ) -> tuple[str | None, str | None]:
         if decision.action not in {"ACCUMULATE", "REDUCE", "EXIT"} or evidence is None:
             return None, None
+        # The watchlist is research only: refuse here even if a caller forgot research=True.
+        if decision.research_only or decision.symbol not in self.settings.symbols:
+            return None, "research_only"
         now = self._now()
         # Price safety lives at submit, which re-quotes the book and refuses a limit more than
         # max_quote_deviation away. A 5-minute window here only discarded valid decisions from
@@ -811,6 +835,12 @@ class CryptoDeskService:
             f"{price(decision.stop)} / {price(decision.target)}",
             f"- Lý do: {decision.reason}",
         ]
+        if decision.research_only:
+            lines[1:1] = [
+                "",
+                "> **NGHIÊN CỨU — không giao dịch.** Đồng này đến từ watchlist của máy quét; "
+                "hệ thống không tạo ticket cho nó.",
+            ]
         if decision.thesis_continuity and decision.thesis_continuity != "NEW":
             lines.append(f"- Kế thừa luận điểm (Continuity): **{decision.thesis_continuity}**")
         if decision.prior_run_id:
