@@ -5,13 +5,13 @@ import os
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Callable, Literal, NamedTuple
+from typing import Any, Callable, Literal, NamedTuple
 from urllib.parse import urlparse
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
-from .config import Settings
+from .config import Settings, WATCHLIST_MAX_ACTIVE
 from .domain import Action, Environment, iso, utcnow
 from .store import TERMINAL_CHAIN_STATES, Store
 
@@ -216,6 +216,20 @@ class OperationsSection(BaseModel):
     recent_events: list[RecentEvent]
 
 
+class WatchlistSection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    evidence_score: Decimal
+    thesis: str
+    last_picked_at: str
+    expires_at: str
+    mark_usdt: Decimal | None
+    change_24h_pct: Decimal | None
+    sparkline_closes: list[Decimal] = Field(default_factory=list)
+    latest_valid_decision: LatestValidDecision | None = None
+
+
 class DashboardSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -225,6 +239,7 @@ class DashboardSnapshot(BaseModel):
     health: HealthStatus
     portfolio: PortfolioSection
     symbols: list[SymbolSection]
+    watchlist: list[WatchlistSection] = Field(default_factory=list)
     operations: OperationsSection
 
 
@@ -317,6 +332,38 @@ def _split_positions(
     )
 
 
+def _latest_valid_decision(row: dict[str, Any] | None) -> LatestValidDecision | None:
+    if row is None:
+        return None
+    decision = row["decision"]
+    futures_setups = [
+        DashboardFuturesSetup(
+            direction=str(setup["direction"]),
+            entry=Decimal(str(setup["entry"])),
+            stop=Decimal(str(setup["stop"])),
+            target=Decimal(str(setup["target"])),
+            risk_reward_ratio=Decimal(str(setup.get("risk_reward_ratio", "1.5"))),
+            rationale=str(setup.get("rationale", "")),
+        )
+        for setup in decision.get("futures_setups") or []
+    ]
+    return LatestValidDecision(
+        run_id=row["id"],
+        cutoff=row["cutoff"],
+        action=decision["action"],
+        conviction=Decimal(decision["conviction"]),
+        bull_case=decision["bull_case"],
+        bear_case=decision["bear_case"],
+        catalysts=list(decision["catalysts"]),
+        invalidation=decision["invalidation"],
+        entry=Decimal(decision["entry"]) if decision["entry"] is not None else None,
+        stop=Decimal(decision["stop"]) if decision["stop"] is not None else None,
+        target=Decimal(decision["target"]) if decision["target"] is not None else None,
+        futures_bias=decision.get("futures_bias"),
+        futures_setups=futures_setups,
+    )
+
+
 def _build_symbols(
     settings: Settings,
     store: Store,
@@ -342,37 +389,9 @@ def _build_symbols(
             )
 
         latest_valid_row = store.latest_valid_run(symbol)
-        latest_valid_decision: LatestValidDecision | None = None
+        latest_valid_decision = _latest_valid_decision(latest_valid_row)
         change_24h_pct: Decimal | None = None
         if latest_valid_row is not None:
-            decision = latest_valid_row["decision"]
-            raw_setups = decision.get("futures_setups") or []
-            futures_setups = [
-                DashboardFuturesSetup(
-                    direction=str(s["direction"]),
-                    entry=Decimal(str(s["entry"])),
-                    stop=Decimal(str(s["stop"])),
-                    target=Decimal(str(s["target"])),
-                    risk_reward_ratio=Decimal(str(s.get("risk_reward_ratio", "1.5"))),
-                    rationale=str(s.get("rationale", "")),
-                )
-                for s in raw_setups
-            ]
-            latest_valid_decision = LatestValidDecision(
-                run_id=latest_valid_row["id"],
-                cutoff=latest_valid_row["cutoff"],
-                action=decision["action"],
-                conviction=Decimal(decision["conviction"]),
-                bull_case=decision["bull_case"],
-                bear_case=decision["bear_case"],
-                catalysts=list(decision["catalysts"]),
-                invalidation=decision["invalidation"],
-                entry=Decimal(decision["entry"]) if decision["entry"] is not None else None,
-                stop=Decimal(decision["stop"]) if decision["stop"] is not None else None,
-                target=Decimal(decision["target"]) if decision["target"] is not None else None,
-                futures_bias=decision.get("futures_bias"),
-                futures_setups=futures_setups,
-            )
             evidence = _evidence_payload(latest_valid_row)
             change_24h_pct = _evidence_change_24h_pct(evidence)
             mark_usdt = priced.mark_usdt if priced else _evidence_mark_usdt(evidence)
@@ -687,6 +706,27 @@ def _build_operations(store: Store, environment: Environment) -> OperationsSecti
     )
 
 
+def _build_watchlist(store: Store, current: datetime) -> list[WatchlistSection]:
+    sections: list[WatchlistSection] = []
+    for entry in store.active_watchlist(iso(current), WATCHLIST_MAX_ACTIVE):
+        row = store.latest_valid_run(entry["symbol"])
+        evidence = _evidence_payload(row)
+        sections.append(
+            WatchlistSection(
+                symbol=entry["symbol"],
+                evidence_score=Decimal(str(entry["payload"]["evidence_score"])),
+                thesis=str(entry["payload"].get("thesis", ""))[:400],
+                last_picked_at=entry["last_picked_at"],
+                expires_at=entry["expires_at"],
+                mark_usdt=_evidence_mark_usdt(evidence),
+                change_24h_pct=_evidence_change_24h_pct(evidence),
+                sparkline_closes=_evidence_sparkline_closes(evidence, limit=30),
+                latest_valid_decision=_latest_valid_decision(row),
+            )
+        )
+    return sections
+
+
 def build_dashboard_snapshot(
     settings: Settings,
     store: Store,
@@ -748,6 +788,7 @@ def build_dashboard_snapshot(
     )
 
     symbols = _build_symbols(settings, store, priced_by_symbol)
+    watchlist = _build_watchlist(store, current)
     health = _build_health(store, current, symbols, settings=settings)
     operations = _build_operations(store, environment)
 
@@ -757,6 +798,7 @@ def build_dashboard_snapshot(
         health=health,
         portfolio=portfolio,
         symbols=symbols,
+        watchlist=watchlist,
         operations=operations,
     )
 

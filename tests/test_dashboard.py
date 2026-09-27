@@ -658,3 +658,44 @@ def test_local_publish_does_not_require_sites_bypass(
     publish_dashboard_from_env(snapshot, strict=True)
 
     assert "OAI-Sites-Authorization" not in captured["headers"]
+
+
+def test_snapshot_lists_active_watchlist_research_with_its_decision(tmp_path: Path):
+    store = Store(tmp_path / "crypto.db")
+    settings = make_settings()
+    store.upsert_watchlist(
+        "NEARUSDT",
+        "near",
+        "scan-1",
+        "2026-09-27T05:00:00+00:00",
+        "2999-01-01T00:00:00+00:00",
+        {"evidence_score": "8.5", "thesis": "Trend holds above support."},
+    )
+    store.upsert_watchlist(
+        "OLDUSDT",
+        "old",
+        "scan-0",
+        "2026-09-01T05:00:00+00:00",
+        "2026-09-08T05:00:00+00:00",
+        {"evidence_score": "9", "thesis": "Expired."},
+    )
+    report_dir = tmp_path / "near-run"
+    report_dir.mkdir()
+    (report_dir / "evidence.json").write_text(json.dumps({"items": []}), encoding="utf-8")
+    store.save_run(
+        "near-run",
+        "2026-09-27T05:10:00+00:00",
+        make_decision(symbol="NEARUSDT", action="ACCUMULATE"),
+        report_dir,
+    )
+
+    snapshot = build_dashboard_snapshot(settings, store)
+
+    assert [entry.symbol for entry in snapshot.watchlist] == ["NEARUSDT"]
+    entry = snapshot.watchlist[0]
+    assert entry.evidence_score == Decimal("8.5")
+    assert entry.latest_valid_decision.action == "ACCUMULATE"
+    assert all(item.symbol != "NEARUSDT" for item in snapshot.symbols)
+    dumped = snapshot.model_dump(mode="json")
+    assert dumped["watchlist"][0]["thesis"] == "Trend holds above support."
+
