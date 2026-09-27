@@ -368,11 +368,17 @@ def _build_symbols(
     settings: Settings,
     store: Store,
     priced_by_symbol: dict[str, _PricedShare],
+    current: datetime | None = None,
 ) -> list[SymbolSection]:
     results: list[SymbolSection] = []
     all_symbols = list(settings.symbols) + [
         s for s in getattr(settings, "vn_symbols", ()) if s not in settings.symbols
     ]
+    as_of_iso = iso(current) if current else iso(utcnow())
+    for entry in store.active_watchlist(as_of_iso, WATCHLIST_MAX_ACTIVE):
+        sym = entry["symbol"]
+        if sym not in all_symbols and store.latest_valid_run(sym) is not None:
+            all_symbols.append(sym)
     for symbol in all_symbols:
         priced = priced_by_symbol.get(symbol)
 
@@ -787,7 +793,7 @@ def build_dashboard_snapshot(
         unpriced_assets_count=unpriced_assets_count,
     )
 
-    symbols = _build_symbols(settings, store, priced_by_symbol)
+    symbols = _build_symbols(settings, store, priced_by_symbol, current)
     watchlist = _build_watchlist(store, current)
     health = _build_health(store, current, symbols, settings=settings)
     operations = _build_operations(store, environment)

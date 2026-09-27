@@ -695,7 +695,9 @@ def test_snapshot_lists_active_watchlist_research_with_its_decision(tmp_path: Pa
     entry = snapshot.watchlist[0]
     assert entry.evidence_score == Decimal("8.5")
     assert entry.latest_valid_decision.action == "ACCUMULATE"
-    assert all(item.symbol != "NEARUSDT" for item in snapshot.symbols)
+    near_sym = next((item for item in snapshot.symbols if item.symbol == "NEARUSDT"), None)
+    assert near_sym is not None
+    assert near_sym.latest_valid_decision.action == "ACCUMULATE"
     dumped = snapshot.model_dump(mode="json")
     assert dumped["watchlist"][0]["thesis"] == "Trend holds above support."
 
