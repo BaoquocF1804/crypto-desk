@@ -5,13 +5,17 @@ from decimal import Decimal
 
 import pytest
 
-from crypto_desk.data import EvidenceError
+from crypto_desk.committee import ProviderError
+from crypto_desk.data import EvidenceError, Fetched
 from crypto_desk.scanner import (
     FEATURE_FIELDS,
     UNIVERSE_SIZE,
     Candidate,
+    ScanError,
+    WatchlistScanner,
     compute_features,
     discover_universe,
+    rank_candidates,
 )
 
 
@@ -159,3 +163,189 @@ def test_too_little_history_is_an_evidence_error():
 def test_feature_fields_name_every_field_but_the_symbol():
     assert "symbol" not in FEATURE_FIELDS
     assert {"support_distance_atr", "long_short_pctile_20d"} <= set(FEATURE_FIELDS)
+
+
+class FakeScanLLM:
+    def __init__(self, *responses):
+        self.responses = list(responses)
+        self.calls: list[dict] = []
+
+    def generate(self, **kwargs):
+        self.calls.append(kwargs)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+def _pick(symbol: str, score: str = "7", fields=("support_distance_atr",)) -> dict:
+    return {
+        "symbol": symbol,
+        "evidence_score": score,
+        "thesis": f"{symbol} trend holds above support.",
+        "supporting_fields": list(fields),
+    }
+
+
+def _features(*symbols: str):
+    closes = [100 + index for index in range(60)]
+    return [
+        compute_features(
+            Candidate(symbol, symbol[:-4], symbol.lower(), Decimal("50000000")),
+            _rows(closes),
+            OI_ROWS,
+            LS_ROWS,
+            TAKER_ROWS,
+            None,
+        )
+        for symbol in symbols
+    ]
+
+
+def test_ranking_returns_valid_picks_highest_score_first():
+    llm = FakeScanLLM({"picks": [_pick("AUSDT", "6"), _pick("BUSDT", "8")], "summary": "Two."})
+
+    ranking = rank_candidates(llm, _features("AUSDT", "BUSDT"), model="flash", thinking="low")
+
+    assert [pick.symbol for pick in ranking.picks] == ["BUSDT", "AUSDT"]
+    assert llm.calls[0]["stage"] == "scan"
+    assert llm.calls[0]["model"] == "flash"
+    assert [row["symbol"] for row in llm.calls[0]["payload"]["candidates"]] == ["AUSDT", "BUSDT"]
+
+
+def test_ranking_retries_once_with_the_validation_error():
+    llm = FakeScanLLM(
+        {"picks": [_pick("AUSDT", fields=("sharpe_ratio",))], "summary": "Invented field."},
+        {"picks": [_pick("AUSDT")], "summary": "Corrected."},
+    )
+
+    ranking = rank_candidates(llm, _features("AUSDT"), model="flash", thinking="low")
+
+    assert ranking.picks[0].symbol == "AUSDT"
+    assert "failed validation" in llm.calls[1]["system_prompt"]
+
+
+@pytest.mark.parametrize(
+    "picks",
+    [
+        [_pick("ZZZUSDT")],
+        [_pick("AUSDT"), _pick("AUSDT")],
+        [_pick("AUSDT"), _pick("AUSDT"), _pick("AUSDT"), _pick("AUSDT")],
+    ],
+)
+def test_ranking_fails_after_two_invalid_answers(picks):
+    llm = FakeScanLLM({"picks": picks, "summary": "Bad."}, {"picks": picks, "summary": "Bad."})
+
+    with pytest.raises(ScanError):
+        rank_candidates(llm, _features("AUSDT"), model="flash", thinking="low")
+
+
+def test_ranking_may_pick_nothing():
+    llm = FakeScanLLM({"picks": [], "summary": "No strong evidence today."})
+
+    assert rank_candidates(llm, _features("AUSDT"), model="flash", thinking="low").picks == []
+
+
+def _fetched(payload):
+    return Fetched("fixture", "fixture://scan", NOW, NOW, payload)
+
+
+class FakeMarket:
+    def __init__(self, *, fail_symbol: str | None = None, broken_listing: bool = False):
+        self.fail_symbol = fail_symbol
+        self.broken_listing = broken_listing
+
+    def ticker_24h_all(self):
+        if self.broken_listing:
+            raise EvidenceError("HTTP transport error fetching ticker")
+        return _fetched(
+            [
+                {"symbol": "NEARUSDT", "quoteVolume": "160000000"},
+                {"symbol": "AVAXUSDT", "quoteVolume": "44000000"},
+            ]
+        )
+
+    def spot_exchange_info_all(self):
+        return _fetched({"symbols": [_spot("NEARUSDT", "NEAR"), _spot("AVAXUSDT", "AVAX")]})
+
+    def futures_exchange_info(self):
+        return _fetched(
+            {
+                "symbols": [
+                    {"symbol": symbol, "contractType": "PERPETUAL", "status": "TRADING"}
+                    for symbol in ("NEARUSDT", "AVAXUSDT")
+                ]
+            }
+        )
+
+    def coingecko_markets(self):
+        return _fetched(
+            [{"id": "near", "symbol": "near"}, {"id": "avalanche-2", "symbol": "avax"}]
+        )
+
+    def premium_index_all(self):
+        return _fetched(
+            [
+                {"symbol": "NEARUSDT", "lastFundingRate": "0.0001"},
+                {"symbol": "BTCUSDT_260925", "lastFundingRate": ""},
+                {"symbol": "UNKNOWN", "lastFundingRate": None},
+            ]
+        )
+
+    def klines(self, symbol, interval, limit):
+        if symbol == self.fail_symbol:
+            raise EvidenceError(f"No {interval} klines for {symbol}")
+        rows = _rows([100 + index for index in range(60)])
+        # Binance appends the still-open candle; it must not reach the table.
+        open_candle = [rows[-1][6] + 1, "999", "999", "999", "999", "0", rows[-1][6] + DAY_MS]
+        return _fetched(rows + [open_candle])
+
+    def open_interest_hist(self, symbol, period="1h", limit=25):
+        return _fetched(OI_ROWS)
+
+    def global_long_short_ratio(self, symbol, period="1h", limit=500):
+        return _fetched(LS_ROWS)
+
+    def taker_long_short_ratio(self, symbol, period="1h", limit=24):
+        return _fetched(TAKER_ROWS)
+
+
+def test_scanner_drops_a_failing_coin_and_ranks_the_rest():
+    llm = FakeScanLLM({"picks": [_pick("NEARUSDT")], "summary": "One."})
+    scanner = WatchlistScanner(
+        FakeMarket(fail_symbol="AVAXUSDT"), llm, model="flash", thinking="low", now=lambda: NOW
+    )
+
+    result = scanner.run(frozenset())
+
+    assert result.error is None
+    assert [candidate.symbol for candidate in result.universe] == ["NEARUSDT", "AVAXUSDT"]
+    assert list(result.dropped) == ["AVAXUSDT"]
+    assert [row["symbol"] for row in llm.calls[0]["payload"]["candidates"]] == ["NEARUSDT"]
+    near = result.features[0]
+    assert near.funding_rate == Decimal("0.0001")
+    assert near.change_20d_pct == Decimal("14.39")  # the open 999 candle was dropped
+    assert result.ranking.picks[0].symbol == "NEARUSDT"
+
+
+def test_scanner_reports_a_listing_failure_without_ranking():
+    llm = FakeScanLLM()
+    scanner = WatchlistScanner(
+        FakeMarket(broken_listing=True), llm, model="flash", thinking="low", now=lambda: NOW
+    )
+
+    result = scanner.run(frozenset())
+
+    assert result.error.startswith("universe:")
+    assert result.ranking is None
+    assert llm.calls == []
+
+
+def test_scanner_reports_a_provider_failure():
+    llm = FakeScanLLM(ProviderError("rate_limit"))
+    scanner = WatchlistScanner(FakeMarket(), llm, model="flash", thinking="low", now=lambda: NOW)
+
+    result = scanner.run(frozenset())
+
+    assert result.error == "provider:rate_limit"
+    assert len(result.features) == 2
