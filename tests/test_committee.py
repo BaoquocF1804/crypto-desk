@@ -324,12 +324,13 @@ def test_debate_payloads_hide_hour_scale_fields_but_keep_what_prompts_require():
     for request in debate:
         keys = _all_keys(request["payload"]["snapshot"])
         # Specialists đã đọc các trường này; ở horizon 20 ngày chúng chỉ là nhiễu bị viện dẫn.
-        assert not {"depth", "oi_change_1h_pct", "taker_buy_sell_ratio"} & keys
+        # depth_summary cũng vậy: bear từng gọi tỉ lệ ask/bid 6.31 là "bức tường cung".
+        assert not {"depth", "depth_summary", "oi_change_1h_pct", "taker_buy_sell_ratio"} & keys
         # Chuỗi close chỉ đi một lần, trong item spot.
         assert "daily_closes" not in request["payload"]["snapshot"]
         assert {
             "atr14_1d",
-            "depth_summary",
+            "price_structure",
             "taker_buy_sell_ratio_24h",
             "long_short_ratio_pctile_20d",
             "daily_closes",
@@ -553,13 +554,13 @@ def test_no_trade_with_levels_uses_computed_rr_instead_of_model_claim():
 
 
 @pytest.mark.parametrize(
-    "reason",
+    ("reason", "error"),
     [
-        "The EMA20 stop implies a gross R:R of 0.82.",
-        "Gross R:R is unquantifiable until a breakout confirms direction.",
+        ("The EMA20 stop implies a gross R:R of 0.82.", "contradicts"),
+        ("Gross R:R is unquantifiable until a breakout confirms direction.", "unquantifiable"),
     ],
 )
-def test_no_trade_rejects_rr_prose_conflicting_with_stored_levels(reason: str):
+def test_no_trade_rejects_rr_prose_conflicting_with_stored_levels(reason: str, error: str):
     fake_llm = FakeLLM()
     original_generate = fake_llm.generate
 
@@ -574,8 +575,73 @@ def test_no_trade_rejects_rr_prose_conflicting_with_stored_levels(reason: str):
 
     assert fake_llm.count("manager") == 2
     assert not result.decision.decided
-    assert "decision_reason must omit R:R" in result.decision.reason
+    assert error in result.decision.reason
     assert [call.status for call in result.calls[-2:]] == ["failure", "failure"]
+
+
+def test_no_trade_accepts_rr_prose_that_matches_its_own_levels():
+    # Levels 100000/95000/110000 give gross R:R 2.00. Saying so is consistent, and banning
+    # every mention left a NO_TRADE for "no target clears R:R" with no way to say why.
+    fake_llm = FakeLLM()
+    manager_levels(
+        fake_llm,
+        action="NO_TRADE",
+        decision_reason="Gross R:R of 2.00 clears the 1.5 minimum, but taker flow at 0.97 is flat.",
+    )
+
+    result = CryptoCommittee(fake_llm).run(valid_snapshot())
+
+    assert result.decision.decided
+    assert fake_llm.count("manager") == 1
+    assert result.decision.reason.startswith("Gross R:R of 2.00")
+
+
+def test_no_trade_accepts_a_qualitative_rr_reason_without_levels():
+    fake_llm = FakeLLM()
+    manager_levels(
+        fake_llm,
+        action="NO_TRADE",
+        entry=None,
+        stop=None,
+        target=None,
+        decision_reason="No defensible target gives R:R above the 1.5 minimum; 0 headlines help.",
+    )
+
+    result = CryptoCommittee(fake_llm).run(valid_snapshot())
+
+    assert result.decision.decided
+    assert fake_llm.count("manager") == 1
+
+
+def test_an_rr_figure_without_levels_is_rejected():
+    fake_llm = FakeLLM()
+    manager_levels(
+        fake_llm,
+        action="NO_TRADE",
+        entry=None,
+        stop=None,
+        target=None,
+        decision_reason="Gross R:R of 1.2 is too low to add.",
+    )
+
+    result = CryptoCommittee(fake_llm).run(valid_snapshot())
+
+    assert not result.decision.decided
+    assert "contradicts" in result.decision.reason
+
+
+def test_rejected_manager_output_is_kept_for_diagnosis():
+    # The first live rejection could not be diagnosed: llm.json held only "invalid_output".
+    fake_llm = FakeLLM()
+    manager_levels(
+        fake_llm, action="NO_TRADE", decision_reason="The EMA20 stop implies a gross R:R of 0.82."
+    )
+
+    result = CryptoCommittee(fake_llm).run(valid_snapshot())
+
+    failures = [call for call in result.calls if call.stage == "manager"]
+    assert len(failures) == 2
+    assert all("gross R:R of 0.82" in (call.detail or "") for call in failures)
 
 
 def test_manager_retries_with_consistency_guidance_and_accepts_correction():

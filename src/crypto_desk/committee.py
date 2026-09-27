@@ -29,6 +29,12 @@ RR_CLAIM = re.compile(
     r"\bR\s*:\s*R\b|\b(?:risk|reward)(?:[\s/-]+to)?[\s/-]+(?:risk|reward)\b",
     re.IGNORECASE,
 )
+RR_UNQUANTIFIABLE = re.compile(r"unquantif|cannot be quantified|not quantifiable", re.IGNORECASE)
+# The figure a reason states for R:R: the first number shortly after the mention. Digits
+# glued to a word (EMA20, ATR14) are indicator names, not figures.
+RR_FIGURE = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)(?![\w])")
+RR_FIGURE_WINDOW = 20
+RR_TOLERANCE = Decimal("0.02")
 SPOT_LEVEL_CLAIM = re.compile(
     r"\b(?:entry|stop|target)\b[^.!?]{0,80}?\b\d[\d,]*(?:\.\d+)?\s*USDT\b",
     re.IGNORECASE,
@@ -159,10 +165,11 @@ ROLE_PROMPTS = {
         "if none does, choose HOLD or NO_TRADE rather than tightening the stop. "
         "For every action, provide either all three Spot levels "
         "(entry, stop, target) or all three as null. The application validates those levels "
-        "and appends the computed gross R:R to the final decision. Do not state an R:R value "
-        "or quote entry, stop, or target prices in decision_reason; the application presents "
-        "those levels separately. Do not claim R:R is unquantifiable; explain the evidence behind "
-        "the action. Do not claim net R:R without cost evidence. If a defensible "
+        "and appends the computed gross R:R to the final decision. decision_reason may cite "
+        "R:R only as the gross R:R of your own entry, stop and target, or the 1.5 minimum, "
+        "without the arithmetic; do not quote entry, stop, or target prices there, since the "
+        "application presents those levels separately. Do not claim R:R is unquantifiable; "
+        "explain the evidence behind the action. Do not claim net R:R without cost evidence. If a defensible "
         "stop or target is unavailable, choose HOLD or NO_TRADE. For HOLD or NO_TRADE, "
         "decision_reason must state a quantitative reason for not adding, citing a supplied "
         "metric or missing evidence count. "
@@ -215,7 +222,7 @@ SPECIALIST_EVIDENCE = {
 # Specialists already read these; at the desk's horizon the debate kept citing them as
 # reasons (hourly taker flow, a 20-level book spanning ~0.01% of price).
 DEBATE_HIDDEN_FIELDS = {
-    "spot": ("depth",),
+    "spot": ("depth", "depth_summary"),
     "derivatives": ("oi_change_1h_pct", "taker_buy_sell_ratio"),
 }
 # Top-level snapshot fields repeat the item payloads (closes twice, hourly ratios again),
@@ -236,9 +243,7 @@ def _debate_snapshot(snapshot: Any) -> dict[str, Any]:
         }
         for item in full["items"]
     ]
-    return {name: full[name] for name in DEBATE_SNAPSHOT_FIELDS if name in full} | {
-        "items": items
-    }
+    return {name: full[name] for name in DEBATE_SNAPSHOT_FIELDS if name in full} | {"items": items}
 
 
 def _system_prompt(role: str) -> str:
@@ -313,8 +318,8 @@ class ManagerDecision(BaseModel):
         min_length=1,
         max_length=1000,
         description="English decision rationale with a supplied quantitative metric. "
-        "Do not state R:R or quote entry, stop, or target prices; the application "
-        "validates those levels and computes R:R.",
+        "Any R:R figure must be the gross R:R of this decision's own entry, stop and target; "
+        "do not quote those prices. The application validates the levels and computes R:R.",
     )
     bull_case: str = Field(min_length=1, max_length=2000, description="Written in English.")
     bear_case: str = Field(min_length=1, max_length=2000, description="Written in English.")
@@ -707,6 +712,8 @@ class ModelCall:
     responded_at: str
     status: Literal["success", "failure"]
     error_category: str | None = None
+    # Why a structured output was rejected, with the manager's own decision_reason.
+    detail: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -948,6 +955,7 @@ class CryptoCommittee:
         last_error = "invalid structured output"
         for attempt in range(1, 3):
             requested_at = datetime.now(UTC).isoformat()
+            parsed = None
             try:
                 retry_prompt = (
                     system_prompt
@@ -955,9 +963,10 @@ class CryptoCommittee:
                     else system_prompt
                     + "\nThe previous manager response failed validation. Return a corrected full JSON "
                     "object. Use all three Spot levels or all null, keep an ACCUMULATE stop at "
-                    "least one atr14_1d below entry, cite only supplied evidence IDs, and omit "
-                    "R:R and entry/stop/target price claims from decision_reason; code computes "
-                    "and presents those levels."
+                    "least one atr14_1d below entry, cite only supplied evidence IDs, state R:R "
+                    "in decision_reason only as the gross R:R of your own levels, and do not "
+                    "quote entry/stop/target prices there; code computes and presents those "
+                    "levels."
                 )
                 raw = self.llm.generate(
                     stage=stage,
@@ -1023,6 +1032,10 @@ class CryptoCommittee:
                         responded_at=datetime.now(UTC).isoformat(),
                         status="failure",
                         error_category="invalid_output",
+                        detail=(
+                            f"{str(exc)[:300]} | decision_reason: "
+                            f"{getattr(parsed, 'decision_reason', '')[:700]}"
+                        ),
                     )
                 )
                 last_error = str(exc)
@@ -1049,14 +1062,13 @@ class CryptoCommittee:
             raise ValueError(f"{decision.action} requires an existing position")
         levels = (decision.entry, decision.stop, decision.target)
         if isinstance(decision, ManagerDecision):
-            if RR_CLAIM.search(decision.decision_reason):
-                raise ValueError("decision_reason must omit R:R claims; levels determine gross R:R")
+            if any(level is not None for level in levels) and None in levels:
+                raise ValueError("Spot levels must be all present or all null")
+            self._validate_rr_prose(decision)
             if SPOT_LEVEL_CLAIM.search(decision.decision_reason):
                 raise ValueError(
                     "decision_reason must omit entry/stop/target price claims; levels are structured"
                 )
-            if any(level is not None for level in levels) and None in levels:
-                raise ValueError("Spot levels must be all present or all null")
         if decision.action not in {"ACCUMULATE", "REDUCE", "EXIT"} and (
             not isinstance(decision, ManagerDecision) or all(level is None for level in levels)
         ):
@@ -1096,6 +1108,42 @@ class CryptoCommittee:
                         f"ACCUMULATE stop distance {decision.entry - decision.stop} is below "
                         f"{MIN_STOP_ATR_MULTIPLE}x ATR14_1d {atr14_1d}"
                     )
+
+    @staticmethod
+    def _validate_rr_prose(decision: ManagerDecision) -> None:
+        """An R:R the reason states must be the one its own levels give.
+
+        Banning every mention left a NO_TRADE for "no target clears R:R" no way to say why,
+        so the manager was rejected twice and the run discarded. What still fails is a
+        figure the levels contradict, which is the hallucination the rule exists for.
+        """
+        reason = decision.decision_reason
+        mentions = list(RR_CLAIM.finditer(reason))
+        if not mentions:
+            return
+        entry, stop, target = decision.entry, decision.stop, decision.target
+        gross_rr = (
+            (target - entry) / (entry - stop)
+            if entry is not None
+            and stop is not None
+            and target is not None
+            and stop < entry < target
+            else None
+        )
+        if gross_rr is not None and RR_UNQUANTIFIABLE.search(reason):
+            raise ValueError("decision_reason calls R:R unquantifiable although its levels set it")
+        for mention in mentions:
+            figure = RR_FIGURE.search(reason[mention.end() : mention.end() + RR_FIGURE_WINDOW])
+            if figure is None:
+                continue
+            value = Decimal(figure.group(1))
+            if value == MIN_GROSS_RISK_REWARD:
+                continue
+            if gross_rr is None or abs(value - gross_rr) > RR_TOLERANCE:
+                raise ValueError(
+                    f"decision_reason R:R {value} contradicts the gross R:R of its levels "
+                    f"({'none' if gross_rr is None else f'{gross_rr:.2f}'})"
+                )
 
     @staticmethod
     def _base_payload(

@@ -97,8 +97,9 @@ ngày của thesis); thiếu ATR thì bị chặn.
 giá (xác nhận bởi hai nến ngày mỗi bên, có ngày), cùng biên cao/thấp 20 và 55 ngày, tính
 từ high/low nến đã đóng. Manager được yêu cầu neo stop/target vào các mức này.
 Khi manager trả về `entry/stop/target`, hệ thống kiểm tra đủ ba mức và tự tính
-R:R gộp từ chính các mức đó cho mọi action. Nếu lời giải thích tự nêu R:R,
-đưa giá vào/dừng/đích ngoài các trường cấu trúc, hoặc các mức giá không hợp lệ,
+R:R gộp từ chính các mức đó cho mọi action. Nếu lời giải thích nêu một con số R:R
+khác với R:R của chính các mức đó (hoặc khác ngưỡng 1.5), đưa giá vào/dừng/đích ngoài
+các trường cấu trúc, hoặc các mức giá không hợp lệ,
 kết quả được yêu cầu sửa một lần rồi chặn nếu vẫn sai.
 ACCUMULATE chỉ được giữ khi một lần chạy manager thứ hai, cùng evidence, cũng ra
 ACCUMULATE; nếu không, quyết định của lần thứ hai được dùng. Prior thesis chỉ lấy
