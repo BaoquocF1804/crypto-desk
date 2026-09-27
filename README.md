@@ -77,7 +77,10 @@ uv run desk --config config.yaml --json doctor --online
 ```bash
 uv run desk --config config.yaml --json sync
 uv run desk --config config.yaml --json screen
+uv run desk --config config.yaml --json scan
+uv run desk --config config.yaml --json watchlist
 uv run desk --config config.yaml --json analyze BTCUSDT
+uv run desk --config config.yaml --json analyze NEARUSDT --research
 uv run desk --config config.yaml --json reflect
 uv run desk --config config.yaml --json tickets
 uv run desk --config config.yaml --json approve TICKET_ID
@@ -112,6 +115,15 @@ theo mức nào chạm trước trên high/low nến ngày, quy ra bội số R.
 symbol/ngày/action chỉ tính một lần.
 `desk reflect` chấm ngay mọi quyết định crypto và VN đã đủ 20 ngày mà không chạy phân
 tích mới; `scripts/daily.sh` gọi nó sau job daily.
+
+`desk scan` quét top 30 cặp USDT (có futures USDⓈ-M, CoinGecko id, OCO/OTO, volume ≥ 20M
+USDT, ngoài allowlist). Code tính bảng chỉ số, Gemini Flash (`models.quick`) chọn tối đa 10
+đồng có evidence mạnh cho thesis Spot long 20 ngày. Cả 10 đồng vào watchlist 7 ngày;
+committee tự phân tích 3 đồng điểm cao nhất, đồng còn lại chạy tay bằng
+`desk analyze SYMBOL --research`. Run nghiên cứu không bao giờ tạo ticket và được chấm
+thành nhóm `watchlist` riêng trong scorecard. Muốn giao dịch một đồng thì phải sửa code:
+thêm nó vào `V1_SYMBOLS`, `coingecko_ids` và `KNOWN_SYMBOLS` của web, rồi mới đưa vào
+`symbols` trong config.
 
 Testnet execution chỉ được bật sau smoke test read-only:
 
