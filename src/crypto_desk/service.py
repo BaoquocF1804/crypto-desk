@@ -8,6 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
 
+import httpx
 from pydantic import BaseModel
 
 from .config import BENCHMARK_SYMBOL, REFLECTION_HORIZON_DAYS, Settings
@@ -390,6 +391,10 @@ class CryptoDeskService:
                     second=0,
                     microsecond=0,
                 )
+                # The 20th daily candle closes at start + horizon; grading sooner reads an
+                # open bar, and a reflection is written once and never revisited.
+                if start + timedelta(days=REFLECTION_HORIZON_DAYS) > self._aware(cutoff):
+                    continue
                 highs, lows, closes = zip(*builder.reflection_bars(run["symbol"], start))
                 benchmark = (
                     ()
@@ -413,7 +418,17 @@ class CryptoDeskService:
                     decision_cutoff=str(run["cutoff"]),
                     benchmark_symbol=BENCHMARK_SYMBOL,
                 )
-            except (EvidenceError, OSError, ValueError, KeyError, TypeError):
+            # One bad run must not stop the sweep: oldest runs go first, so an uncaught error
+            # here repeats every day, and daily() grades before it analyses.
+            except (
+                EvidenceError,
+                OSError,
+                ValueError,
+                KeyError,
+                TypeError,
+                ArithmeticError,
+                httpx.HTTPError,
+            ):
                 continue
             saved.append(run["id"])
         return saved

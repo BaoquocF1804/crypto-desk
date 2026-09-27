@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 import uuid
 
+import httpx
 from pydantic import BaseModel
 
 from .config import REFLECTION_HORIZON_DAYS, VN_BENCHMARK_SYMBOL, Settings
@@ -261,7 +262,18 @@ class VNDeskService:
                     decision_cutoff=str(run["cutoff"]),
                     benchmark_symbol=VN_BENCHMARK_SYMBOL,
                 )
-            except (EvidenceError, OSError, ValueError, KeyError, TypeError, StopIteration):
+            # One bad run must not stop the sweep: oldest runs go first, so an uncaught error
+            # here would block every VN run behind it, every day.
+            except (
+                EvidenceError,
+                OSError,
+                ValueError,
+                KeyError,
+                TypeError,
+                StopIteration,
+                ArithmeticError,
+                httpx.HTTPError,
+            ):
                 continue
             saved.append(run["id"])
         return saved

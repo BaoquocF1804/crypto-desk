@@ -301,6 +301,8 @@ def test_committee_prompts_require_english_and_isolate_specialists():
     )
     assert "price_structure" in requests["technical"]["system_prompt"]
     assert "price_structure" in requests["manager"]["system_prompt"]
+    # In a breakout every overhead level sits below entry; the target needs another anchor.
+    assert "no overhead level exists" in requests["manager"]["system_prompt"]
 
 
 def _all_keys(value: Any) -> set[str]:

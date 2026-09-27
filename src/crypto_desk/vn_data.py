@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import time
 from typing import Any, Callable
 
@@ -444,9 +444,14 @@ class VNEvidenceBuilder:
                 f"Cần {periods} phiên sau {session_date} cho {symbol} nhưng chỉ có {len(after)}"
             )
         base = ordered[0]
-        return (
-            (Decimal(str(base["close"])), Decimal(str(base["closeRaw"]))),
-            tuple(
+        try:
+            prices = (Decimal(str(base["close"])), Decimal(str(base["closeRaw"])))
+            bars = tuple(
                 tuple(Decimal(str(row[key])) for key in ("high", "low", "close")) for row in after
-            ),
-        )
+            )
+        except (InvalidOperation, KeyError) as exc:
+            raise EvidenceError(f"Giá phiên không hợp lệ cho {symbol}") from exc
+        # A null or zero price would otherwise divide by zero or read as a stop hit.
+        if not all(value > 0 for value in (*prices, *(value for bar in bars for value in bar))):
+            raise EvidenceError(f"Giá phiên không hợp lệ cho {symbol}")
+        return prices, bars

@@ -215,3 +215,15 @@ def test_vn_reflection_window_requires_the_decision_session_itself():
 
     with pytest.raises(EvidenceError, match="phiên quyết định"):
         VNEvidenceBuilder(_window_client(rows)).reflection_window("FPT", "01/09/2026")
+
+
+def test_vn_reflection_window_rejects_missing_or_non_positive_prices():
+    from crypto_desk.vn_data import VNEvidenceBuilder
+
+    decision = _session("01/09/2026", "100", "100", "101", "99")
+    after = [_session(f"{day:02d}/09/2026", "100", "100", "101", "99") for day in range(2, 22)]
+    for broken in ({"high": None}, {"low": "0"}):
+        rows = list(reversed([after[0] | broken, *after[1:]])) + [decision]
+
+        with pytest.raises(EvidenceError, match="không hợp lệ"):
+            VNEvidenceBuilder(_window_client(rows)).reflection_window("FPT", "01/09/2026")

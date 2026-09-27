@@ -629,3 +629,41 @@ def test_vn_accumulate_levels_cannot_be_the_session_price_limits():
     assert stopped_at_floor.action == "NO_TRADE"
     assert "floor" in stopped_at_floor.reason
     assert run("91", "120").action == "NO_TRADE"
+
+
+def test_one_unreadable_vn_window_does_not_stop_the_sweep(tmp_path):
+    import decimal
+
+    settings = Settings(
+        database=tmp_path / "vn.sqlite3",
+        artifacts=tmp_path / "a",
+        vn_artifacts=tmp_path / "a",
+        vn_symbols=("FPT", "MBB"),
+    )
+    store = Store(settings.database)
+    for run_id, symbol, age in (("r-fpt", "FPT", 41), ("r-mbb", "MBB", 40)):
+        report_dir = tmp_path / run_id
+        report_dir.mkdir()
+        (report_dir / "evidence.json").write_text(_vn_evidence(), encoding="utf-8")
+        store.save_run(
+            run_id,
+            (NOW - timedelta(days=age)).isoformat(),
+            make_vn_decision(symbol, "HOLD"),
+            report_dir,
+        )
+
+    class _Builder:
+        def reflection_window(self, symbol, session_date, periods=20):
+            if symbol == "FPT":
+                raise decimal.InvalidOperation("SSI returned high=null")
+            bar = (Decimal("101"), Decimal("99"), Decimal("100"))
+            return (Decimal("100"), Decimal("100")), (bar,) * periods
+
+        def reflection_closes(self, symbol, start, periods=20):
+            return tuple(Decimal("100") for _ in range(periods))
+
+    service = VNDeskService(settings, store, evidence_builder=_Builder())
+    try:
+        assert service.refresh_reflections(NOW) == ["r-mbb"]
+    finally:
+        store.close()

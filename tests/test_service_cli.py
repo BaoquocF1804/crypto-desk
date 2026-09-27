@@ -2147,3 +2147,63 @@ def test_reflect_command_grades_both_markets_without_running_an_analysis(
     assert result.exit_code == 0, result.stdout
     assert json.loads(result.stdout) == {"crypto": ["crypto-run"], "vn": ["vn-run"]}
     assert calls == [("crypto", True), ("vn", True)]
+
+
+def _decided_hold(symbol: str) -> ResearchDecision:
+    return ResearchDecision(
+        symbol=symbol,
+        action="HOLD",
+        conviction=Decimal("5"),
+        bull_case="Bull",
+        bear_case="Bear",
+        catalysts=(),
+        invalidation="Invalidation",
+        entry=None,
+        stop=None,
+        target=None,
+        evidence_ids=("evidence-1",),
+        reason="committee decision",
+    )
+
+
+def _save_due_run(store: Store, tmp_path: Path, run_id: str, symbol: str, age: timedelta) -> None:
+    report_dir = tmp_path / run_id
+    report_dir.mkdir()
+    (report_dir / "evidence.json").write_text(json.dumps({"binance_mid": "100"}), encoding="utf-8")
+    store.save_run(run_id, (NOW - age).isoformat(), _decided_hold(symbol), report_dir)
+
+
+def test_one_failing_reflection_does_not_stop_the_sweep(tmp_path: Path):
+    # Run cũ nhất được quét trước; một lỗi HTTP ở đó từng làm sập cả lượt mỗi ngày,
+    # và daily() chấm điểm trước khi phân tích nên còn huỷ luôn phân tích hôm đó.
+    settings = Settings(
+        database=tmp_path / "crypto.sqlite3",
+        artifacts=tmp_path / "artifacts",
+        symbols=("BTCUSDT", "ETHUSDT"),
+    )
+    store = Store(settings.database)
+    _save_due_run(store, tmp_path, "eth-run", "ETHUSDT", timedelta(days=22))
+    _save_due_run(store, tmp_path, "btc-run", "BTCUSDT", timedelta(days=21))
+
+    class _Builder(FakeBuilder):
+        def reflection_bars(self, symbol, start, periods=20):
+            if symbol == "ETHUSDT":
+                request = httpx.Request("GET", "https://api.binance.com/api/v3/klines")
+                response = httpx.Response(503, request=request)
+                raise httpx.HTTPStatusError("503", request=request, response=response)
+            return super().reflection_bars(symbol, start, periods)
+
+    service = CryptoDeskService(settings, store, evidence_builder=_Builder(), now=lambda: NOW)
+
+    assert service.refresh_reflections(NOW) == ["btc-run"]
+
+
+def test_reflection_waits_for_the_twentieth_daily_candle_to_close(tmp_path: Path):
+    # Đủ 20 ngày kể từ cutoff nhưng nến thứ 20 (bắt đầu từ ngày sau cutoff) còn đang mở.
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    _save_due_run(store, tmp_path, "young-run", "BTCUSDT", timedelta(days=20))
+    service = CryptoDeskService(settings, store, evidence_builder=FakeBuilder(), now=lambda: NOW)
+
+    assert service.refresh_reflections(NOW) == []
+    assert service.refresh_reflections(NOW + timedelta(days=1)) == ["young-run"]
