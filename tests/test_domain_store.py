@@ -24,10 +24,10 @@ def make_ticket(environment: str = "testnet") -> TradeTicket:
     )
 
 
-def test_store_uses_schema_version_three(tmp_path: Path):
+def test_store_uses_schema_version_four(tmp_path: Path):
     store = Store(tmp_path / "crypto.db")
 
-    assert store.schema_version() == 3
+    assert store.schema_version() == 4
 
 
 def test_journal_lifecycle_first_run_finish_report(tmp_path: Path):
@@ -87,7 +87,7 @@ def test_existing_v2_database_migrates_to_v3(tmp_path: Path):
     second.close()
 
     migrated = Store(path)
-    assert migrated.schema_version() == 3
+    assert migrated.schema_version() == 4
     migrated.journal_start("cmd-1", "hash-1", "sync")
 
 
@@ -392,3 +392,58 @@ def test_unreflected_runs_are_not_starved_by_old_runs_that_can_never_be_graded(t
     rows = store.unreflected_runs("2026-06-30T00:15:00+00:00")
 
     assert "gradeable" in [row["id"] for row in rows]
+
+
+def _watch(store: Store, symbol: str, picked: str, expires: str, score: str = "7") -> None:
+    store.upsert_watchlist(
+        symbol, symbol.lower(), f"scan-{picked}", picked, expires, {"evidence_score": score}
+    )
+
+
+def test_watchlist_upsert_refreshes_a_pick_but_keeps_its_first_date(tmp_path: Path):
+    store = Store(tmp_path / "crypto.db")
+    _watch(store, "NEARUSDT", "2026-09-20T00:00:00+00:00", "2026-09-27T00:00:00+00:00", "6")
+    _watch(store, "NEARUSDT", "2026-09-25T00:00:00+00:00", "2026-10-02T00:00:00+00:00", "8")
+
+    entry = store.watchlist_entry("NEARUSDT")
+
+    assert entry["first_added_at"] == "2026-09-20T00:00:00+00:00"
+    assert entry["last_picked_at"] == "2026-09-25T00:00:00+00:00"
+    assert entry["payload"] == {"evidence_score": "8"}
+
+
+def test_active_watchlist_skips_expired_entries_newest_first(tmp_path: Path):
+    store = Store(tmp_path / "crypto.db")
+    _watch(store, "OLDUSDT", "2026-09-01T00:00:00+00:00", "2026-09-08T00:00:00+00:00")
+    _watch(store, "AUSDT", "2026-09-24T00:00:00+00:00", "2026-10-01T00:00:00+00:00")
+    _watch(store, "BUSDT", "2026-09-26T00:00:00+00:00", "2026-10-03T00:00:00+00:00")
+
+    active = store.active_watchlist("2026-09-27T00:00:00+00:00")
+
+    assert [entry["symbol"] for entry in active] == ["BUSDT", "AUSDT"]
+    assert store.active_watchlist("2026-09-27T00:00:00+00:00", limit=1)[0]["symbol"] == "BUSDT"
+    # Expired rows stay: their runs still need grading.
+    assert store.watchlist_symbols() == ("AUSDT", "BUSDT", "OLDUSDT")
+
+
+def test_watchlist_records_the_latest_research_run(tmp_path: Path):
+    store = Store(tmp_path / "crypto.db")
+    _watch(store, "NEARUSDT", "2026-09-26T00:00:00+00:00", "2026-10-03T00:00:00+00:00")
+
+    store.set_watchlist_run("NEARUSDT", "run-9")
+
+    assert store.watchlist_entry("NEARUSDT")["payload"]["last_run_id"] == "run-9"
+
+
+def test_a_version_three_database_migrates_to_four(tmp_path: Path):
+    path = tmp_path / "crypto.db"
+    store = Store(path)
+    store.db.execute("DROP TABLE watchlist")
+    store.db.execute("UPDATE schema_meta SET version=3")
+    store.db.commit()
+    store.close()
+
+    migrated = Store(path)
+
+    assert migrated.schema_version() == 4
+    assert migrated.active_watchlist("2026-09-27T00:00:00+00:00") == []

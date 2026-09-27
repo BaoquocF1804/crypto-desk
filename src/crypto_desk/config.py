@@ -22,6 +22,9 @@ DEFAULT_VN_NEWS_FEEDS = (
     "https://vietstock.vn/144/chung-khoan/co-phieu.rss",
 )
 REFLECTION_HORIZON_DAYS = 20
+# Research watchlist from the cheap-model scanner: an entry lives a week unless re-picked.
+WATCHLIST_TTL_DAYS = 7
+WATCHLIST_MAX_ACTIVE = 10
 BENCHMARK_SYMBOL = "BTCUSDT"
 MAX_TICKET_TTL_MINUTES = 30
 DEFAULT_COINGECKO_IDS = {

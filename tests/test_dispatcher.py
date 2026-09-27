@@ -169,7 +169,7 @@ def test_doctor_is_offline_and_curated(tmp_path: Path, monkeypatch):
     result = dispatcher.dispatch("doctor", {}, operator_email=OPERATOR)
     assert result.execution_mode == "DRY_RUN"
     assert result.binance_keys_present is True
-    assert result.database_schema_version == 3
+    assert result.database_schema_version == 4
     dumped = result.model_dump()
     assert "dashboard-key-sentinel" not in str(dumped)
     assert "dashboard-secret-sentinel" not in str(dumped)

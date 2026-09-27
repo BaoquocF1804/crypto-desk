@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from .config import WATCHLIST_MAX_ACTIVE
 from .domain import (
     Environment,
     PortfolioSnapshot,
@@ -140,6 +141,22 @@ class Store:
                 """
             )
             self.db.execute("UPDATE schema_meta SET version=3")
+            version = 3
+        if version < 4:
+            self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS watchlist (
+                  symbol TEXT PRIMARY KEY,
+                  coingecko_id TEXT NOT NULL,
+                  first_added_at TEXT NOT NULL,
+                  last_picked_at TEXT NOT NULL,
+                  expires_at TEXT NOT NULL,
+                  scan_id TEXT NOT NULL,
+                  payload TEXT NOT NULL
+                )
+                """
+            )
+            self.db.execute("UPDATE schema_meta SET version=4")
         self.db.commit()
 
     def close(self) -> None:
@@ -668,4 +685,66 @@ class Store:
             "error_code": row["error_code"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
+        }
+
+    def upsert_watchlist(
+        self,
+        symbol: str,
+        coingecko_id: str,
+        scan_id: str,
+        picked_at: str,
+        expires_at: str,
+        payload: dict[str, Any],
+    ) -> None:
+        self.db.execute(
+            """
+            INSERT INTO watchlist(
+              symbol, coingecko_id, first_added_at, last_picked_at, expires_at, scan_id, payload
+            ) VALUES (?,?,?,?,?,?,?)
+            ON CONFLICT(symbol) DO UPDATE SET
+              coingecko_id=excluded.coingecko_id,
+              last_picked_at=excluded.last_picked_at,
+              expires_at=excluded.expires_at,
+              scan_id=excluded.scan_id,
+              payload=excluded.payload
+            """,
+            (symbol, coingecko_id, picked_at, picked_at, expires_at, scan_id, _json(payload)),
+        )
+        self.db.commit()
+
+    def set_watchlist_run(self, symbol: str, run_id: str) -> None:
+        entry = self.watchlist_entry(symbol)
+        if entry is None:
+            return
+        self.db.execute(
+            "UPDATE watchlist SET payload=? WHERE symbol=?",
+            (_json({**entry["payload"], "last_run_id": run_id}), symbol),
+        )
+        self.db.commit()
+
+    def watchlist_entry(self, symbol: str) -> dict[str, Any] | None:
+        row = self.db.execute("SELECT * FROM watchlist WHERE symbol=?", (symbol,)).fetchone()
+        return None if row is None else self._watchlist_row(row)
+
+    def active_watchlist(self, now: str, limit: int = WATCHLIST_MAX_ACTIVE) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            "SELECT * FROM watchlist WHERE expires_at > ? ORDER BY last_picked_at DESC LIMIT ?",
+            (now, limit),
+        ).fetchall()
+        return [self._watchlist_row(row) for row in rows]
+
+    def watchlist_symbols(self) -> tuple[str, ...]:
+        rows = self.db.execute("SELECT symbol FROM watchlist ORDER BY symbol").fetchall()
+        return tuple(row["symbol"] for row in rows)
+
+    @staticmethod
+    def _watchlist_row(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "symbol": row["symbol"],
+            "coingecko_id": row["coingecko_id"],
+            "first_added_at": row["first_added_at"],
+            "last_picked_at": row["last_picked_at"],
+            "expires_at": row["expires_at"],
+            "scan_id": row["scan_id"],
+            "payload": json.loads(row["payload"]),
         }
