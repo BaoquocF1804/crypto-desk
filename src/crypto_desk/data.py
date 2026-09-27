@@ -14,7 +14,7 @@ from typing import Any, Callable
 import httpx
 
 from .domain import EvidenceItem, SymbolRules, iso, to_jsonable, utcnow
-from .indicators import atr, ema, rsi
+from .indicators import atr, ema, rsi, swing_points
 
 
 SPOT_PUBLIC = "https://api.binance.com"
@@ -389,6 +389,46 @@ def _parse_feed(text: str) -> list[dict[str, str]]:
     return result
 
 
+def price_structure(
+    highs: tuple[Decimal, ...],
+    lows: tuple[Decimal, ...],
+    dates: tuple[str, ...],
+    mid: Decimal,
+    tick: Decimal,
+) -> dict[str, Any]:
+    """Hỗ trợ/kháng cự từ nến ngày đã đóng, do code tính thay vì để model suy từ close.
+
+    Không có mức nào để neo, manager từng đặt stop đúng ở ngưỡng tối thiểu của cổng
+    R:R. Danh sách này cho nó mức thật, gồm cả râu nến mà chuỗi close không có.
+    """
+    swing_highs, swing_lows = swing_points(highs, lows)
+
+    def extreme(pick: Callable[..., Decimal], values: tuple[Decimal, ...], window: int):
+        return pick(values[-window:]).quantize(tick) if len(values) >= window else None
+
+    def level(index: int, values: tuple[Decimal, ...]) -> dict[str, Any]:
+        return {"price": values[index].quantize(tick), "date": dates[index]}
+
+    supports = sorted(
+        (level(index, lows) for index in swing_lows if lows[index] < mid),
+        key=lambda item: item["price"],
+        reverse=True,
+    )
+    resistances = sorted(
+        (level(index, highs) for index in swing_highs if highs[index] > mid),
+        key=lambda item: item["price"],
+    )
+    return {
+        "version": "structure-v1",
+        "high_20d": extreme(max, highs, 20),
+        "low_20d": extreme(min, lows, 20),
+        "high_55d": extreme(max, highs, 55),
+        "low_55d": extreme(min, lows, 55),
+        "swing_supports": supports[:3],
+        "swing_resistances": resistances[:3],
+    }
+
+
 def news_aliases(base_asset: str, coingecko_id: str) -> tuple[str, ...]:
     return (base_asset, coingecko_id, *EXTRA_NEWS_ALIASES.get(base_asset, ()))
 
@@ -534,6 +574,7 @@ class EvidenceBuilder:
         daily_hlc = _high_low_close(daily.payload)
         four_hour_hlc = _high_low_close(four_hour.payload)
         daily_closes, four_hour_closes = daily_hlc[2], four_hour_hlc[2]
+        daily_dates = tuple(_utc_from_ms(row[0]).date().isoformat() for row in daily.payload)
         # normalize(): Binance sends tickSize "0.01000000"; quantizing to that keeps 8 digits.
         tick = rules.tick_size.normalize()
         technical_indicators = {
@@ -560,6 +601,9 @@ class EvidenceBuilder:
             "daily_closes": daily_closes,
             "four_hour_closes": four_hour_closes,
             "technical_indicators": technical_indicators,
+            "price_structure": price_structure(
+                daily_hlc[0], daily_hlc[1], daily_dates, mid, tick
+            ),
             "depth": depth.payload,
             "depth_summary": _depth_summary(depth.payload),
             "rules": asdict(rules),

@@ -42,6 +42,15 @@ def valid_snapshot(atr14_1d: str | None = "2500") -> EvidenceSnapshot:
                 "atr14_4h": "1000",
                 "atr14_1d": atr14_1d,
             },
+            "price_structure": {
+                "version": "structure-v1",
+                "high_20d": "101000",
+                "low_20d": "96000",
+                "high_55d": "104000",
+                "low_55d": "90000",
+                "swing_supports": [{"price": "97500", "date": "2026-07-10"}],
+                "swing_resistances": [{"price": "102500", "date": "2026-07-05"}],
+            },
             "depth": {"bids": [["99999", "1"]], "asks": [["100001", "1"]]},
             "depth_summary": {
                 "bid_levels": 1,
@@ -229,6 +238,7 @@ def test_committee_prompts_require_english_and_isolate_specialists():
             "daily_closes",
             "four_hour_closes",
             "technical_indicators",
+            "price_structure",
         },
         "liquidity": {
             "symbol",
@@ -289,6 +299,8 @@ def test_committee_prompts_require_english_and_isolate_specialists():
     assert all(
         "20-day thesis horizon" in request["system_prompt"] for request in requests.values()
     )
+    assert "price_structure" in requests["technical"]["system_prompt"]
+    assert "price_structure" in requests["manager"]["system_prompt"]
 
 
 def _all_keys(value: Any) -> set[str]:

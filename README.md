@@ -93,6 +93,9 @@ EMA/ATR làm tròn theo tick size, RSI lấy hai chữ số thập phân. Thiế
 trị chỉ báo là `null`; các chỉ báo này phục vụ phân tích và không tự tạo tín hiệu giao
 dịch. ACCUMULATE chỉ hợp lệ khi stop cách entry ít nhất 1× ATR14 ngày (khớp horizon 20
 ngày của thesis); thiếu ATR thì bị chặn.
+`price_structure` đi cạnh các chỉ báo: tối đa ba swing low dưới giá và ba swing high trên
+giá (xác nhận bởi hai nến ngày mỗi bên, có ngày), cùng biên cao/thấp 20 và 55 ngày, tính
+từ high/low nến đã đóng. Manager được yêu cầu neo stop/target vào các mức này.
 Khi manager trả về `entry/stop/target`, hệ thống kiểm tra đủ ba mức và tự tính
 R:R gộp từ chính các mức đó cho mọi action. Nếu lời giải thích tự nêu R:R,
 đưa giá vào/dừng/đích ngoài các trường cấu trúc, hoặc các mức giá không hợp lệ,

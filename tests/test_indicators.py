@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from crypto_desk.indicators import atr, ema, rsi
+from crypto_desk.indicators import atr, ema, rsi, swing_points
 
 
 def test_ema_uses_sma_seed_and_all_closed_values():
@@ -26,3 +26,14 @@ def test_wilder_atr_covers_gap_up_inside_bar_and_gap_down_ranges():
     # True ranges: 1.5 (high - prior close), 1.5, 1 (high - low), 0.7 (prior close - low).
     assert atr(highs[:3], lows[:3], closes[:3], 2) == Decimal("1.5")
     assert atr(highs, lows, closes, 2) == Decimal("0.975")
+
+
+def test_swing_points_mark_confirmed_daily_extremes_once():
+    highs = tuple(map(Decimal, (10, 11, 15, 15, 11, 13, 12)))
+    lows = tuple(map(Decimal, (9, 8, 12, 10, 7, 11, 10)))
+
+    swing_highs, swing_lows = swing_points(highs, lows, width=2)
+
+    # Đỉnh 15 lặp ở hai nến chỉ tính nến đầu; hai nến cuối chưa đủ nến xác nhận.
+    assert swing_highs == (2,)
+    assert swing_lows == (4,)

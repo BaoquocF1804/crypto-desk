@@ -783,3 +783,39 @@ def test_ether_headlines_count_as_eth_news():
     )
 
     assert [item["relevance"] for item in tagged] == ["symbol", "market"]
+
+
+def test_price_structure_keeps_the_nearest_swings_on_each_side_of_mid():
+    from crypto_desk.data import price_structure
+
+    highs = tuple(map(Decimal, (105, 108, 112, 109, 104, 103, 106, 110, 107, 105, 104)))
+    lows = tuple(map(Decimal, (100, 103, 106, 101, 96, 98, 101, 104, 99, 97, 98)))
+    dates = tuple(f"2026-07-{day:02d}" for day in range(1, 12))
+
+    structure = price_structure(highs, lows, dates, Decimal("105"), Decimal("1"))
+
+    assert structure["swing_supports"] == [{"price": Decimal("96"), "date": "2026-07-05"}]
+    assert structure["swing_resistances"] == [
+        {"price": Decimal("110"), "date": "2026-07-08"},
+        {"price": Decimal("112"), "date": "2026-07-03"},
+    ]
+    # 11 nến: chưa đủ lịch sử cho biên 20/55 ngày (coin mới niêm yết).
+    assert structure["high_20d"] is None
+    assert structure["low_55d"] is None
+
+
+def test_spot_evidence_carries_price_structure_beside_technical_indicators():
+    snapshot = EvidenceBuilder(FakePublicClient(), {"BTCUSDT": "bitcoin"}).build("BTCUSDT", CUTOFF)
+
+    spot = next(item for item in snapshot.items if item.kind == "spot")
+    structure = spot.payload["price_structure"]
+
+    # Fixture: close = 90000 + 100 × index, high/low = close ± 20, 120 nến tăng đều.
+    assert structure["version"] == "structure-v1"
+    assert structure["high_20d"] == "101920.00"
+    assert structure["low_20d"] == "99980.00"
+    assert structure["high_55d"] == "101920.00"
+    assert structure["low_55d"] == "96480.00"
+    assert structure["swing_supports"] == []
+    assert structure["swing_resistances"] == []
+    assert spot.payload["technical_indicators"]["version"] == "technical-v1"

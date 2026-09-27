@@ -50,3 +50,30 @@ def atr(
     for true_range in ranges[period:]:
         value = (value * (period - 1) + true_range) / period
     return value
+
+
+def swing_points(
+    highs: tuple[Decimal, ...],
+    lows: tuple[Decimal, ...],
+    width: int = 2,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Indices of confirmed swing highs and lows.
+
+    A swing high beats the ``width`` bars before it strictly and is not exceeded by the
+    ``width`` bars after it, so a flat top counts once and the last ``width`` bars are
+    never swings: nothing has confirmed them yet.
+    """
+    last = len(highs) - width
+    swing_highs = tuple(
+        index
+        for index in range(width, last)
+        if highs[index] > max(highs[index - width : index])
+        and highs[index] >= max(highs[index + 1 : index + width + 1])
+    )
+    swing_lows = tuple(
+        index
+        for index in range(width, last)
+        if lows[index] < min(lows[index - width : index])
+        and lows[index] <= min(lows[index + 1 : index + width + 1])
+    )
+    return swing_highs, swing_lows

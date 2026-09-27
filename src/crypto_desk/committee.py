@@ -70,6 +70,10 @@ ROLE_PROMPTS = {
         "all in USDT. EMA20/EMA50 describe the Daily trend; RSI14 describes 4H momentum; "
         "ATR14 is the average 4H/Daily true range in USDT. "
         "Identify each indicator's timeframe and closed-candle as_of timestamp. "
+        "price_structure lists confirmed daily swing supports below and swing resistances "
+        "above Spot mid, with dates, plus 20/55-day high/low ranges, all from closed daily "
+        "candles including wicks; prefer these levels over support/resistance inferred "
+        "from closes. "
         "Derive trends, momentum, volatility, and potential support/resistance only when the "
         "series supports them; show the input prices for any computed return or level. "
         "Do not cite unavailable indicator values, MACD, or any other indicator absent from "
@@ -146,7 +150,9 @@ ROLE_PROMPTS = {
         "must use Spot USDT prices anchored to the snapshot; entry must be within 2% of Spot mid. "
         "Before ACCUMULATE, internally calculate gross R:R = (target - entry) / (entry - stop) "
         "and require R:R >= 1.5. An ACCUMULATE stop must sit at least one "
-        "technical_indicators.atr14_1d below entry; tighter stops are rejected. Place the stop "
+        "technical_indicators.atr14_1d below entry; tighter stops are rejected. "
+        "Prefer a stop just below a price_structure swing support, low_20d or low_55d, and "
+        "a target at or below a swing resistance, high_20d or high_55d. Place the stop "
         "at a level whose break invalidates the thesis, then find a target that clears R:R; "
         "if none does, choose HOLD or NO_TRADE rather than tightening the stop. "
         "For every action, provide either all three Spot levels "
@@ -178,6 +184,7 @@ SPECIALIST_EVIDENCE = {
             "daily_closes",
             "four_hour_closes",
             "technical_indicators",
+            "price_structure",
         ),
     ),
     "liquidity": (
