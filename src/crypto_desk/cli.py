@@ -29,7 +29,12 @@ from .committee import (
     StructuredClient,
     VNManagerDecision,
 )
-from .config import MAINNET_GRADUATION_CHAINS, Settings, load_settings
+from .config import (
+    MAINNET_GRADUATION_CHAINS,
+    WATCHLIST_MAX_ACTIVE,
+    Settings,
+    load_settings,
+)
 from .dashboard import (
     DashboardPublishError,
     SITES_BYPASS_TOKEN_ENV,
@@ -39,8 +44,9 @@ from .dashboard import (
     publish_dashboard_from_env,
 )
 from .data import EvidenceBuilder, PublicDataClient
-from .domain import to_jsonable
+from .domain import iso, to_jsonable
 from .execution import ExecutionService, confirmation_code, telegram_approval_proof
+from .scanner import WatchlistScanner
 from .runner import (
     COMMAND_API_URL_ENV,
     RUNNER_ENABLED_ENV,
@@ -116,15 +122,53 @@ def screen(ctx: typer.Context) -> None:
 
 
 @app.command()
-def analyze(ctx: typer.Context, symbol: str) -> None:
+def analyze(
+    ctx: typer.Context,
+    symbol: str,
+    research: Annotated[bool, typer.Option("--research")] = False,
+) -> None:
     settings = _load(ctx)
     normalized = symbol.upper()
-    if normalized not in settings.symbols:
+    if not research and normalized not in settings.symbols:
         _fail("Symbol is outside the configured allowlist")
-    service = _service(settings, broker=True)
-    result = service.analyze(normalized)
+    service = _service(settings, broker=not research)
+    try:
+        result = service.analyze(normalized, research=research)
+    except ValueError as exc:
+        # A missing or expired watchlist entry is an operator error, not a crash.
+        _fail(str(exc))
     _publish_dashboard_if_configured(settings)
     _emit(ctx, result)
+
+
+@app.command()
+def scan(ctx: typer.Context) -> None:
+    """Quét top 30 cặp USDT bằng model rẻ: tối đa 10 đồng vào watchlist, top 3 tự phân tích."""
+    settings = _load(ctx)
+    result = _service(settings, scanner=True).scan()
+    _publish_dashboard_if_configured(settings)
+    _emit(ctx, result)
+
+
+@app.command()
+def watchlist(ctx: typer.Context) -> None:
+    """Watchlist nghiên cứu còn hạn, kèm quyết định committee gần nhất và thời điểm của nó."""
+    settings = _load(ctx)
+    store = Store(settings.database)
+    try:
+        rows = []
+        for entry in store.active_watchlist(iso(_utcnow()), WATCHLIST_MAX_ACTIVE):
+            latest = store.latest_valid_run(entry["symbol"])
+            rows.append(
+                {
+                    **entry,
+                    "latest_action": latest["decision"]["action"] if latest else None,
+                    "latest_cutoff": latest["cutoff"] if latest else None,
+                }
+            )
+    finally:
+        store.close()
+    _emit(ctx, rows)
 
 
 @app.command()
@@ -575,12 +619,11 @@ def _service(
     broker: bool = False,
     committee: bool = True,
     execution: bool = False,
+    scanner: bool = False,
 ) -> CryptoDeskService:
     store = Store(settings.database)
-    evidence_builder = EvidenceBuilder(
-        PublicDataClient(settings.news_feeds),
-        settings.coingecko_ids,
-    )
+    public = PublicDataClient(settings.news_feeds)
+    evidence_builder = EvidenceBuilder(public, settings.coingecko_ids)
     selected_broker = None
     if broker:
         try:
@@ -589,10 +632,13 @@ def _service(
             if execution:
                 raise
             selected_broker = None
+    # One model client: Gemini spaces requests per client, so a second client would let the
+    # scan call and the first committee call land back to back.
+    llm = _structured_client(settings) if committee or scanner else None
     selected_committee = None
     if committee:
         selected_committee = CryptoCommittee(
-            _structured_client(settings),
+            llm,
             provider=settings.models.provider,
             quick_model=settings.models.quick,
             deep_model=settings.models.deep,
@@ -608,6 +654,14 @@ def _service(
             selected_broker,
             settings,
         )
+    selected_scanner = None
+    if scanner:
+        selected_scanner = WatchlistScanner(
+            public,
+            llm,
+            model=settings.models.quick,
+            thinking=settings.models.quick_thinking,
+        )
     return CryptoDeskService(
         settings,
         store,
@@ -615,6 +669,7 @@ def _service(
         evidence_builder=evidence_builder,
         committee=selected_committee,
         execution=selected_execution,
+        scanner=selected_scanner,
     )
 
 

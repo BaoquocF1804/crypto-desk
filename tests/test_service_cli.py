@@ -225,6 +225,8 @@ def test_public_commands_exist():
         "runner",
         "vn-analyze",
         "vn-daily",
+        "scan",
+        "watchlist",
     ):
         assert command in result.stdout
 
@@ -1165,7 +1167,7 @@ def test_dashboard_hook_fires_after_analyze(tmp_path: Path, monkeypatch):
     calls = _install_publish_hook_spy(monkeypatch)
 
     class FakeService:
-        def analyze(self, symbol):
+        def analyze(self, symbol, *, research=False):
             return {"symbol": symbol, "action": "HOLD"}
 
     monkeypatch.setattr("crypto_desk.cli._service", lambda settings, **kwargs: FakeService())
@@ -2497,5 +2499,100 @@ def test_research_runs_are_graded_as_the_watchlist_cohort(tmp_path: Path):
     assert sorted(service.refresh_reflections(NOW)) == ["btc-run", "near-run"]
     cohorts = {row["symbol"]: row["payload"]["cohort"] for row in store.list_reflections()}
     assert cohorts == {"NEARUSDT": "watchlist", "BTCUSDT": "allowlist"}
+
+
+def test_scan_command_runs_the_scanner_and_emits_the_result(tmp_path: Path, monkeypatch):
+    config = _write_config(tmp_path)
+    requested: dict[str, Any] = {}
+
+    class _Service:
+        def scan(self):
+            return {"status": "COMPLETED", "picks": [{"symbol": "NEARUSDT"}]}
+
+    def fake_service(settings, **kwargs):
+        requested.update(kwargs)
+        return _Service()
+
+    monkeypatch.setattr("crypto_desk.cli._service", fake_service)
+
+    result = CliRunner().invoke(app, ["--config", str(config), "--json", "scan"])
+
+    assert result.exit_code == 0, result.stdout
+    assert json.loads(result.stdout)["picks"] == [{"symbol": "NEARUSDT"}]
+    assert requested["scanner"] is True
+
+
+def test_analyze_research_flag_skips_the_allowlist_gate(tmp_path: Path, monkeypatch):
+    config = _write_config(tmp_path)
+    calls: list[tuple[str, bool]] = []
+
+    class _Service:
+        def analyze(self, symbol, *, research=False):
+            calls.append((symbol, research))
+            return {"run_id": "run-1"}
+
+    monkeypatch.setattr("crypto_desk.cli._service", lambda settings, **kwargs: _Service())
+
+    result = CliRunner().invoke(
+        app, ["--config", str(config), "--json", "analyze", "nearusdt", "--research"]
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert calls == [("NEARUSDT", True)]
+
+
+def test_analyze_research_without_an_active_entry_fails_cleanly(tmp_path: Path, monkeypatch):
+    config = _write_config(tmp_path)
+
+    class _Service:
+        def analyze(self, symbol, *, research=False):
+            raise ValueError("Research analysis needs an active watchlist entry")
+
+    monkeypatch.setattr("crypto_desk.cli._service", lambda settings, **kwargs: _Service())
+
+    result = CliRunner().invoke(app, ["--config", str(config), "analyze", "OLDUSDT", "--research"])
+
+    # Exit code 2 from _fail, not 1 from an uncaught traceback.
+    assert result.exit_code == 2
+    assert "active watchlist entry" in result.output
+
+
+def test_scan_service_shares_one_model_client_and_one_public_client(tmp_path: Path, monkeypatch):
+    created: list[object] = []
+
+    def fake_client(settings):
+        created.append(object())
+        return created[-1]
+
+    monkeypatch.setattr("crypto_desk.cli._structured_client", fake_client)
+
+    service = _service(make_settings(tmp_path), scanner=True)
+
+    assert len(created) == 1
+    assert service.scanner.llm is service.committee.llm
+    assert service.scanner.client is service.evidence_builder.client
+
+
+def test_watchlist_command_lists_active_entries(tmp_path: Path):
+    config = _write_config(tmp_path)
+    store = Store(tmp_path / "crypto.sqlite3")
+    store.upsert_watchlist(
+        "NEARUSDT",
+        "near",
+        "scan-1",
+        "2026-09-27T05:00:00+00:00",
+        "2999-01-01T00:00:00+00:00",
+        {"evidence_score": "8", "thesis": "Trend holds."},
+    )
+    store.close()
+
+    result = CliRunner().invoke(app, ["--config", str(config), "--json", "watchlist"])
+
+    assert result.exit_code == 0, result.stdout
+    rows = json.loads(result.stdout)
+    assert [(row["symbol"], row["latest_action"], row["latest_cutoff"]) for row in rows] == [
+        ("NEARUSDT", None, None)
+    ]
+
 
 
