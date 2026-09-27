@@ -11,7 +11,13 @@ from typing import Any, Callable
 import httpx
 from pydantic import BaseModel
 
-from .config import BENCHMARK_SYMBOL, REFLECTION_HORIZON_DAYS, Settings
+from .config import (
+    AUTO_ANALYZE_PICKS,
+    BENCHMARK_SYMBOL,
+    REFLECTION_HORIZON_DAYS,
+    WATCHLIST_TTL_DAYS,
+    Settings,
+)
 from .data import EvidenceBuilder, EvidenceError, EvidenceSnapshot
 from .domain import (
     PortfolioSnapshot,
@@ -52,6 +58,7 @@ class CryptoDeskService:
         evidence_builder: EvidenceBuilder | Any | None = None,
         committee: Any | None = None,
         execution: ExecutionService | None = None,
+        scanner: Any | None = None,
         now: Callable[[], datetime] = utcnow,
     ):
         self.settings = settings
@@ -60,6 +67,7 @@ class CryptoDeskService:
         self.evidence_builder = evidence_builder
         self.committee = committee
         self.execution = execution
+        self.scanner = scanner
         self.now = now
 
     def sync(self) -> PortfolioSnapshot:
@@ -98,6 +106,71 @@ class CryptoDeskService:
                 )
             results.append(result)
         return sorted(results, key=lambda item: item.score, reverse=True)
+
+    def scan(self) -> dict[str, Any]:
+        """Đưa mọi pick của máy quét vào watchlist; chỉ các pick đầu được tự phân tích."""
+        if self.scanner is None:
+            raise ValueError("Watchlist scanner is required for scan")
+        started = self._aware(self._now())
+        scan_id = str(uuid.uuid4())
+        result = self.scanner.run(frozenset(self.settings.symbols))
+        picks: list[dict[str, Any]] = []
+        if result.ranking is not None:
+            by_symbol = {candidate.symbol: candidate for candidate in result.universe}
+            expires = iso(started + timedelta(days=WATCHLIST_TTL_DAYS))
+            for rank, pick in enumerate(result.ranking.picks):
+                self.store.upsert_watchlist(
+                    pick.symbol,
+                    by_symbol[pick.symbol].coingecko_id,
+                    scan_id,
+                    iso(started),
+                    expires,
+                    {
+                        "evidence_score": str(pick.evidence_score),
+                        "thesis": pick.thesis,
+                        "supporting_fields": list(pick.supporting_fields),
+                    },
+                )
+                row: dict[str, Any] = {
+                    "symbol": pick.symbol,
+                    "evidence_score": pick.evidence_score,
+                    "thesis": pick.thesis,
+                    "run_id": None,
+                    "action": None,
+                }
+                # Picks come best first. Only the top ones spend a committee; the rest wait
+                # for `desk analyze SYMBOL --research`.
+                if rank < AUTO_ANALYZE_PICKS:
+                    run = self.analyze(pick.symbol, research=True)
+                    row.update(run_id=run.run_id, action=run.decision.action)
+                picks.append(row)
+        artifact_path = (
+            self.settings.artifacts / "scans" / started.date().isoformat() / f"{scan_id}.json"
+        )
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_json(
+            artifact_path,
+            {
+                "scan_id": scan_id,
+                "started_at": iso(started),
+                "universe": result.universe,
+                "dropped": result.dropped,
+                "features": result.features,
+                "ranking": None if result.ranking is None else result.ranking.model_dump(mode="json"),
+                "error": result.error,
+                "run_ids": [pick["run_id"] for pick in picks if pick["run_id"]],
+            },
+        )
+        return {
+            "status": "FAILED" if result.error else "COMPLETED",
+            "scan_id": scan_id,
+            "universe_size": len(result.universe),
+            "dropped": result.dropped,
+            "picks": picks,
+            "summary": None if result.ranking is None else result.ranking.summary,
+            "error": result.error,
+            "artifact": str(artifact_path),
+        }
 
     def analyze(
         self,

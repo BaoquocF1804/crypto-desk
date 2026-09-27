@@ -25,6 +25,8 @@ REFLECTION_HORIZON_DAYS = 20
 # Research watchlist from the cheap-model scanner: an entry lives a week unless re-picked.
 WATCHLIST_TTL_DAYS = 7
 WATCHLIST_MAX_ACTIVE = 10
+# Only the best picks of a scan get a full committee; the rest wait for a manual run.
+AUTO_ANALYZE_PICKS = 3
 BENCHMARK_SYMBOL = "BTCUSDT"
 MAX_TICKET_TTL_MINUTES = 30
 DEFAULT_COINGECKO_IDS = {

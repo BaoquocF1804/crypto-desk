@@ -35,6 +35,7 @@ from crypto_desk.service import (
     calculate_reflection,
 )
 from crypto_desk.execution import telegram_approval_proof
+from crypto_desk.scanner import Candidate, ScanPick, ScanRanking, ScanResult
 from crypto_desk.store import Store
 
 
@@ -2355,5 +2356,100 @@ def test_ticket_creation_refuses_a_research_decision_even_for_an_allowlisted_sym
     assert service._create_ticket(decision, make_snapshot("BTCUSDT"), NOW) == (
         None,
         "research_only",
+    )
+
+
+class FakeScanner:
+    def __init__(self, result: ScanResult):
+        self.result = result
+        self.excluded: frozenset[str] | None = None
+
+    def run(self, exclude: frozenset[str]) -> ScanResult:
+        self.excluded = exclude
+        return self.result
+
+
+def _scan_result(*symbols: str, error: str | None = None) -> ScanResult:
+    universe = tuple(
+        Candidate(symbol, symbol[:-4], symbol[:-4].lower(), Decimal("160000000"))
+        for symbol in symbols
+    )
+    ranking = (
+        None
+        if error
+        else ScanRanking(
+            picks=[
+                ScanPick(
+                    symbol=symbol,
+                    evidence_score=Decimal(9 - index),
+                    thesis="Trend holds above support.",
+                    supporting_fields=["support_distance_atr"],
+                )
+                for index, symbol in enumerate(symbols)
+            ],
+            summary="Ranked picks.",
+        )
+    )
+    return ScanResult(universe, {"ZECUSDT": "EvidenceError: no klines"}, (), ranking, error)
+
+
+def test_scan_watchlists_every_pick_but_analyses_only_the_top_three(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    scanner = FakeScanner(_scan_result("NEARUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"))
+    committee = FakeCommittee()
+    service = CryptoDeskService(
+        settings,
+        store,
+        evidence_builder=FakeBuilder(),
+        committee=committee,
+        scanner=scanner,
+        now=lambda: NOW,
+    )
+
+    result = service.scan()
+
+    assert result["status"] == "COMPLETED"
+    assert scanner.excluded == frozenset(settings.symbols)
+    assert result["dropped"] == {"ZECUSDT": "EvidenceError: no klines"}
+    assert committee.calls == 3
+    assert [(pick["symbol"], pick["action"]) for pick in result["picks"]] == [
+        ("NEARUSDT", "ACCUMULATE"),
+        ("AVAXUSDT", "ACCUMULATE"),
+        ("LINKUSDT", "ACCUMULATE"),
+        ("DOGEUSDT", None),
+    ]
+    # The fourth pick waits for a manual run: on the watchlist, never analysed.
+    assert result["picks"][3]["run_id"] is None
+    assert store.watchlist_entry("DOGEUSDT") is not None
+    assert store.latest_run("DOGEUSDT") is None
+    near = store.watchlist_entry("NEARUSDT")
+    assert near["coingecko_id"] == "near"
+    assert near["expires_at"] == (NOW + timedelta(days=7)).isoformat()
+    assert store.latest_run("NEARUSDT")["id"] == result["picks"][0]["run_id"]
+    artifact = json.loads(Path(result["artifact"]).read_text(encoding="utf-8"))
+    assert len(artifact["ranking"]["picks"]) == 4
+    assert artifact["run_ids"] == [pick["run_id"] for pick in result["picks"][:3]]
+
+
+def test_a_failed_scan_leaves_the_watchlist_unchanged(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    store = Store(settings.database)
+    service = CryptoDeskService(
+        settings,
+        store,
+        evidence_builder=FakeBuilder(),
+        committee=FakeCommittee(),
+        scanner=FakeScanner(_scan_result("NEARUSDT", error="provider:rate_limit")),
+        now=lambda: NOW,
+    )
+
+    result = service.scan()
+
+    assert result["status"] == "FAILED"
+    assert result["error"] == "provider:rate_limit"
+    assert store.watchlist_symbols() == ()
+    assert json.loads(Path(result["artifact"]).read_text(encoding="utf-8"))["error"] == (
+        "provider:rate_limit"
     )
 
