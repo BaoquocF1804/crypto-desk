@@ -368,3 +368,27 @@ def test_unreflected_runs_with_empty_symbol_tuple_returns_nothing(tmp_path: Path
         store.close()
 
     assert rows == []
+
+
+def test_unreflected_runs_are_not_starved_by_old_runs_that_can_never_be_graded(tmp_path: Path):
+    # Run hỏng bị bỏ qua nhưng không bao giờ được đánh dấu; với LIMIT 100 thì 100 run hỏng
+    # cũ nhất chiếm trọn cửa sổ và run chấm được đứng sau chúng không bao giờ tới lượt.
+    store = Store(tmp_path / "crypto.db")
+    failed = make_decision()
+    for index in range(101):
+        store.save_run(
+            f"failed-{index:03d}",
+            f"2026-06-01T{index // 60:02d}:{index % 60:02d}:00+00:00",
+            failed,
+            Path("artifacts/failed"),
+        )
+    store.save_run(
+        "gradeable",
+        "2026-06-02T00:15:00+00:00",
+        make_decision(evidence_ids=("evidence-1",)),
+        Path("artifacts/gradeable"),
+    )
+
+    rows = store.unreflected_runs("2026-06-30T00:15:00+00:00")
+
+    assert "gradeable" in [row["id"] for row in rows]

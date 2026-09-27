@@ -245,10 +245,14 @@ class Store:
 
         Bảng ``research_runs`` dùng chung cho mọi asset class, nên job chấm điểm
         của một đường phải nói rõ nó nhận symbol nào; nếu không nó sẽ vớ phải
-        run của đường khác, ném lỗi trên một khoá evidence không tồn tại, và vì
-        lỗi bị nuốt nên run đó kẹt lại "chưa reflect" vĩnh viễn, chiếm suất
-        trong ``LIMIT 100`` ở mọi lần chạy sau.
+        run của đường khác và ném lỗi trên một khoá evidence không tồn tại.
+
+        Không có LIMIT: run hỏng bị bỏ qua nhưng không bao giờ được đánh dấu,
+        nên ``LIMIT 100`` từng để 100 run hỏng cũ nhất chiếm trọn cửa sổ và
+        không run nào sau chúng được chấm nữa.
         """
+        # ponytail: quét cả bảng mỗi lần chạy; thêm cờ "không chấm được" vào
+        # research_runs nếu bảng lên tới hàng trăm nghìn dòng.
         if symbols is not None and not symbols:
             return []
         params: list[Any] = [completed_before]
@@ -262,7 +266,6 @@ class Store:
             LEFT JOIN reflections AS f ON f.run_id = r.id
             WHERE f.run_id IS NULL AND r.cutoff <= ?{clause}
             ORDER BY r.cutoff
-            LIMIT 100
             """,
             params,
         ).fetchall()
