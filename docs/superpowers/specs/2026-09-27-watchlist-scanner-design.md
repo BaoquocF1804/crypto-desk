@@ -101,7 +101,7 @@ Sắp xếp theo `quoteVolume` giảm dần, lấy `UNIVERSE_SIZE = 30`.
 - **Payload:** `{"horizon_days": 20, "fields": {tên: mô tả}, "candidates": [ScanFeatures...]}`.
 - **Schema:**
   - `ScanPick`: `symbol`, `evidence_score` (0–10), `thesis` (≤ 400 ký tự), `supporting_fields` (1–6 tên trường).
-  - `ScanRanking`: `picks` (≤ 10), `summary` (≤ 600 ký tự).
+  - `ScanRanking`: `picks` (≤ 10), `summary` (≤ 2000 ký tự; nới từ 600 sau khi lượt quét thật đầu tiên bị từ chối vì đầu ra không hợp lệ, nguyên nhân chưa xác nhận).
 - **Code kiểm tra:** symbol phải có trong `candidates`, không trùng, `supporting_fields` là tên trường có thật. Sai thì thử lại 1 lần kèm lý do; vẫn sai hoặc provider lỗi thì lượt quét dừng với lỗi. Artifact bảng chỉ số vẫn được ghi để chẩn đoán.
 - Picks được sắp theo `evidence_score` giảm dần; điểm bằng nhau giữ thứ tự model trả về.
 

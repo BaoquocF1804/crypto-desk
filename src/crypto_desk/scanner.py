@@ -245,7 +245,7 @@ class ScanRanking(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     picks: list[ScanPick] = Field(max_length=MAX_PICKS)
-    summary: str = Field(min_length=1, max_length=600)
+    summary: str = Field(min_length=1, max_length=2000)
 
 
 class ScanError(RuntimeError):

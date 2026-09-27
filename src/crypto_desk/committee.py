@@ -698,7 +698,7 @@ class GeminiStructuredClient:
         try:
             return response_model.model_validate_json(output)
         except ValidationError as exc:
-            raise StructuredOutputError("Gemini returned invalid structured output") from exc
+            raise StructuredOutputError(f"Gemini returned invalid structured output: {exc}") from exc
 
 
 @dataclass(frozen=True, slots=True)
