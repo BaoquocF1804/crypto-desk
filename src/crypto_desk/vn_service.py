@@ -181,6 +181,9 @@ class VNDeskService:
         decision_action: str | None = None,
         decision_cutoff: str | None = None,
         benchmark_symbol: str | None = None,
+        highs: tuple[Decimal, ...] = (),
+        lows: tuple[Decimal, ...] = (),
+        levels: tuple[Decimal, Decimal, Decimal] | None = None,
     ) -> dict[str, Any]:
         if len(closes) < REFLECTION_HORIZON_DAYS:
             raise ValueError(
@@ -190,6 +193,9 @@ class VNDeskService:
             entry=entry,
             closes=closes,
             benchmark_closes=benchmark_closes,
+            highs=highs,
+            lows=lows,
+            levels=levels,
         )
         payload["horizon_days"] = REFLECTION_HORIZON_DAYS
         if decision_action is not None:
@@ -219,43 +225,43 @@ class VNDeskService:
                 evidence = json.loads(
                     (Path(run["report_dir"]) / "evidence.json").read_text(encoding="utf-8")
                 )
-                entry_val = (
-                    evidence.get("closeRaw")
-                    or evidence.get("close_raw")
-                    or evidence.get("mid")
-                    or evidence.get("binance_mid")
+                spot = next(item["payload"] for item in evidence["items"] if item["kind"] == "spot")
+                session_date = str(spot["trading_date"])
+                (base_close, base_raw), bars = builder.reflection_window(
+                    run["symbol"], session_date, periods=REFLECTION_HORIZON_DAYS
                 )
-                if entry_val is None:
-                    continue
-                entry = Decimal(str(entry_val))
-                run_cutoff = datetime.fromisoformat(run["cutoff"]).astimezone(UTC)
-                start = (run_cutoff + timedelta(days=1)).replace(
-                    hour=0,
-                    minute=0,
-                    second=0,
-                    microsecond=0,
-                )
-                closes = builder.reflection_closes(
-                    run["symbol"], start, periods=REFLECTION_HORIZON_DAYS
-                )
+                highs, lows, closes = zip(*bars)
+                session_start = datetime.strptime(session_date, "%d/%m/%Y").replace(tzinfo=UTC)
                 benchmark = (
                     ()
                     if run["symbol"] == VN_BENCHMARK_SYMBOL
                     else builder.reflection_closes(
-                        VN_BENCHMARK_SYMBOL, start, periods=REFLECTION_HORIZON_DAYS
+                        VN_BENCHMARK_SYMBOL, session_start, periods=REFLECTION_HORIZON_DAYS + 1
                     )
                 )
+                # Mức giá của quyết định là VND thô, cửa sổ là giá điều chỉnh; tỉ số của
+                # chính phiên quyết định đưa chúng về một thang.
+                factor = base_close / base_raw
+                decision = run["decision"]
+                raw_levels = tuple(decision.get(key) for key in ("entry", "stop", "target"))
                 self.save_reflection(
                     run_id=run["id"],
                     symbol=run["symbol"],
-                    entry=entry,
+                    entry=base_close,
                     closes=closes,
                     benchmark_closes=benchmark,
-                    decision_action=str(run["decision"]["action"]),
+                    highs=highs,
+                    lows=lows,
+                    levels=(
+                        None
+                        if None in raw_levels
+                        else tuple(Decimal(str(level)) * factor for level in raw_levels)
+                    ),
+                    decision_action=str(decision["action"]),
                     decision_cutoff=str(run["cutoff"]),
                     benchmark_symbol=VN_BENCHMARK_SYMBOL,
                 )
-            except (EvidenceError, OSError, ValueError, KeyError, TypeError):
+            except (EvidenceError, OSError, ValueError, KeyError, TypeError, StopIteration):
                 continue
             saved.append(run["id"])
         return saved

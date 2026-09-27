@@ -160,3 +160,58 @@ def test_vn_evidence_builder_reflection_closes_counts_sessions():
 
 
 
+
+
+def _session(date: str, close: str, close_raw: str, high: str, low: str) -> dict:
+    return {"tradingDate": date, "close": close, "closeRaw": close_raw, "high": high, "low": low}
+
+
+def _window_client(rows: list[dict]):
+    from datetime import datetime, timezone
+    from unittest.mock import MagicMock
+
+    from crypto_desk.data import Fetched
+
+    at = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    client = MagicMock()
+    client.stock_info.return_value = Fetched("ssi", "stock-info", at, at, rows)
+    return client
+
+
+def test_vn_reflection_window_returns_the_decision_session_and_adjusted_bars_after_it():
+    from crypto_desk.vn_data import VNEvidenceBuilder
+
+    decision = _session("01/09/2026", "90", "100", "91", "89")
+    after = [
+        _session(f"{day:02d}/09/2026", str(100 + day), str(110 + day), str(101 + day), str(99 + day))
+        for day in range(2, 22)
+    ]
+    # SSI trả phiên mới nhất trước.
+    client = _window_client(list(reversed(after)) + [decision])
+
+    base, bars = VNEvidenceBuilder(client).reflection_window("FPT", "01/09/2026", periods=20)
+
+    assert base == (Decimal("90"), Decimal("100"))
+    assert len(bars) == 20
+    # high/low/close điều chỉnh, không phải closeRaw.
+    assert bars[0] == (Decimal("103"), Decimal("101"), Decimal("102"))
+    # 50 ngày lịch đủ 20 phiên kể cả khi có Tết, và không vượt 40 dòng SSI cho phép.
+    client.stock_info.assert_called_once_with("FPT", "01/09/2026", "21/10/2026", page_size=40)
+
+
+def test_vn_reflection_window_waits_until_enough_sessions_have_closed():
+    from crypto_desk.vn_data import VNEvidenceBuilder
+
+    rows = [_session(f"{day:02d}/09/2026", "100", "100", "101", "99") for day in range(15, 0, -1)]
+
+    with pytest.raises(EvidenceError, match="Cần 20 phiên"):
+        VNEvidenceBuilder(_window_client(rows)).reflection_window("FPT", "01/09/2026")
+
+
+def test_vn_reflection_window_requires_the_decision_session_itself():
+    from crypto_desk.vn_data import VNEvidenceBuilder
+
+    rows = [_session(f"{day:02d}/09/2026", "100", "100", "101", "99") for day in range(25, 1, -1)]
+
+    with pytest.raises(EvidenceError, match="phiên quyết định"):
+        VNEvidenceBuilder(_window_client(rows)).reflection_window("FPT", "01/09/2026")

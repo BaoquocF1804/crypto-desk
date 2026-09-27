@@ -263,6 +263,22 @@ def test_vn_reflections_are_benchmarked_against_vn30_not_btc(tmp_path):
     assert payload["benchmark_symbol"] == "VN30"
 
 
+def _vn_evidence(session_date: str = "01/08/2026", close_raw: str = "100") -> str:
+    return json.dumps(
+        {
+            "symbol": "FPT",
+            "mid": close_raw,
+            "binance_mid": close_raw,
+            "items": [
+                {
+                    "kind": "spot",
+                    "payload": {"trading_date": session_date, "close_raw": close_raw},
+                }
+            ],
+        }
+    )
+
+
 def test_vn_reflection_sweep_never_picks_up_crypto_runs(tmp_path):
     """Bảng research_runs dùng chung; quét không lọc sẽ vớ phải run crypto."""
     settings = Settings(
@@ -278,9 +294,7 @@ def test_vn_reflection_sweep_never_picks_up_crypto_runs(tmp_path):
     for run_id, symbol in (("r-btc", "BTCUSDT"), ("r-fpt", "FPT")):
         report_dir = tmp_path / run_id
         report_dir.mkdir()
-        (report_dir / "evidence.json").write_text(
-            json.dumps({"closeRaw": "100", "binance_mid": "100"}), encoding="utf-8"
-        )
+        (report_dir / "evidence.json").write_text(_vn_evidence(), encoding="utf-8")
         store.save_run(
             run_id,
             (NOW - timedelta(days=40)).isoformat(),
@@ -289,9 +303,14 @@ def test_vn_reflection_sweep_never_picks_up_crypto_runs(tmp_path):
         )
 
     class _Builder:
+        def reflection_window(self, symbol, session_date, periods=20):
+            swept.append(symbol)
+            bar = (Decimal("101"), Decimal("99"), Decimal("100"))
+            return (Decimal("100"), Decimal("100")), (bar,) * periods
+
         def reflection_closes(self, symbol, start, periods=20):
             swept.append(symbol)
-            return tuple(Decimal("100") for _ in range(20))
+            return tuple(Decimal("100") for _ in range(periods))
 
     service = VNDeskService(settings, store, evidence_builder=_Builder())
     try:
@@ -301,6 +320,75 @@ def test_vn_reflection_sweep_never_picks_up_crypto_runs(tmp_path):
 
     assert saved == ["r-fpt"]
     assert "BTCUSDT" not in swept
+
+
+def test_vn_reflection_measures_return_and_setup_on_the_adjusted_scale(tmp_path):
+    # FPT 18/09/2026: close điều chỉnh 64530 = 0,9 × closeRaw 71700 (chia cổ tức sau phiên).
+    # So thẳng mức thô với giá điều chỉnh sẽ ghi lỗ ảo −10% và báo chạm stop 68000.
+    settings = Settings(
+        database=tmp_path / "vn.sqlite3",
+        artifacts=tmp_path / "a",
+        vn_artifacts=tmp_path / "a",
+        vn_symbols=("FPT",),
+    )
+    store = Store(settings.database)
+    report_dir = tmp_path / "r-fpt"
+    report_dir.mkdir()
+    (report_dir / "evidence.json").write_text(
+        _vn_evidence("18/09/2026", "71700"), encoding="utf-8"
+    )
+    decision = dataclasses.replace(
+        make_vn_decision("FPT", "ACCUMULATE"),
+        entry=Decimal("71700"),
+        stop=Decimal("68000"),
+        target=Decimal("80000"),
+    )
+    store.save_run("r-fpt", (NOW - timedelta(days=40)).isoformat(), decision, report_dir)
+    asked: list[str] = []
+
+    class _Builder:
+        def reflection_window(self, symbol, session_date, periods=20):
+            asked.append(session_date)
+            bar = (Decimal("64600"), Decimal("63000"), Decimal("64530"))
+            return (Decimal("64530"), Decimal("71700")), (bar,) * periods
+
+        def reflection_closes(self, symbol, start, periods=20):
+            return tuple(Decimal("1900") for _ in range(periods))
+
+    service = VNDeskService(settings, store, evidence_builder=_Builder())
+    try:
+        assert service.refresh_reflections(NOW) == ["r-fpt"]
+        payload = store.list_reflections("FPT")[0]["payload"]
+    finally:
+        store.close()
+
+    assert asked == ["18/09/2026"]
+    assert Decimal(payload["realized_return"]) == 0
+    # Stop quy đổi = 68000 × 0,9 = 61200, dưới đáy 63000 của cửa sổ.
+    assert payload["barrier_outcome"] == "open"
+    assert Decimal(payload["r_multiple"]) == 0
+
+
+def test_vn_reflection_skips_evidence_without_a_decision_session(tmp_path):
+    settings = Settings(
+        database=tmp_path / "vn.sqlite3",
+        artifacts=tmp_path / "a",
+        vn_artifacts=tmp_path / "a",
+        vn_symbols=("FPT",),
+    )
+    store = Store(settings.database)
+    report_dir = tmp_path / "r-legacy"
+    report_dir.mkdir()
+    (report_dir / "evidence.json").write_text(json.dumps({"mid": "100"}), encoding="utf-8")
+    store.save_run(
+        "r-legacy", (NOW - timedelta(days=40)).isoformat(), make_vn_decision(), report_dir
+    )
+
+    service = VNDeskService(settings, store, evidence_builder=object())
+    try:
+        assert service.refresh_reflections(NOW) == []
+    finally:
+        store.close()
 
 
 def test_vn_technical_evidence_includes_close_raw():

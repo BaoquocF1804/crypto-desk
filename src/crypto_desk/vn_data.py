@@ -150,11 +150,22 @@ class SSIClient:
         as_of = datetime.fromtimestamp(data["t"][-1], tz=UTC)
         return Fetched("ssi", source, fetched_at, as_of, data)
 
-    def stock_info(self, symbol: str, from_date: str, to_date: str) -> Fetched:
+    def stock_info(
+        self,
+        symbol: str,
+        from_date: str,
+        to_date: str,
+        *,
+        page_size: int | None = None,
+    ) -> Fetched:
+        params: dict[str, Any] = {"symbol": symbol, "fromDate": from_date, "toDate": to_date}
+        if page_size is not None:
+            # SSI trả phiên mới nhất trước, mặc định 20 dòng và chặn ở 40.
+            params["pageSize"] = page_size
         source, payload, fetched_at = self._json(
             SSI_IBOARD_API,
             "/statistics/company/ssmi/stock-info",
-            params={"symbol": symbol, "fromDate": from_date, "toDate": to_date},
+            params=params,
         )
         data = payload.get("data") if isinstance(payload, dict) else payload
         if not data or not isinstance(data, list):
@@ -405,3 +416,37 @@ class VNEvidenceBuilder:
                 f"Cần {periods} phiên giao dịch đã đóng cho {symbol} nhưng chỉ có {len(pairs)}"
             )
         return tuple(Decimal(str(c)) for _, c in pairs[:periods])
+
+    def reflection_window(
+        self,
+        symbol: str,
+        session_date: str,
+        periods: int = 20,
+    ) -> tuple[tuple[Decimal, Decimal], tuple[tuple[Decimal, Decimal, Decimal], ...]]:
+        """Phiên quyết định và ``periods`` phiên sau đó, từ cùng một lần gọi stock_info.
+
+        Trả về ((close điều chỉnh, close thô) của phiên quyết định, các (high, low,
+        close) điều chỉnh sau đó), tất cả theo VND. Cùng một response nên cùng một
+        gốc điều chỉnh: lợi nhuận tính trên giá điều chỉnh, còn tỉ số hai giá của
+        phiên quyết định quy entry/stop/target thô về cùng thang. ``charts_history``
+        không dùng được ở đây vì nó tính theo nghìn đồng.
+        """
+        start = datetime.strptime(session_date, "%d/%m/%Y")
+        # 50 ngày lịch vẫn đủ 20 phiên khi có Tết, và tối đa ~37 phiên, dưới trần 40 dòng.
+        to_date = (start + timedelta(days=periods * 2 + 10)).strftime("%d/%m/%Y")
+        rows = self.client.stock_info(symbol, session_date, to_date, page_size=40).payload
+        ordered = sorted(rows, key=lambda row: datetime.strptime(row["tradingDate"], "%d/%m/%Y"))
+        if not ordered or ordered[0]["tradingDate"] != session_date:
+            raise EvidenceError(f"Không có phiên quyết định {session_date} cho {symbol}")
+        after = ordered[1 : periods + 1]
+        if len(after) < periods:
+            raise EvidenceError(
+                f"Cần {periods} phiên sau {session_date} cho {symbol} nhưng chỉ có {len(after)}"
+            )
+        base = ordered[0]
+        return (
+            (Decimal(str(base["close"])), Decimal(str(base["closeRaw"]))),
+            tuple(
+                tuple(Decimal(str(row[key])) for key in ("high", "low", "close")) for row in after
+            ),
+        )
